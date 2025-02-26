@@ -58,13 +58,33 @@ async function saveUserData(userId, userData) {
 /**
  * @returns {Promise<Array>}
  */
+/**
+ * Retrieves all user data from DynamoDB, handling pagination.
+ * @returns {Promise<Array>}
+ */
 async function listUserData() {
   const params = {
     TableName: TABLE_NAME
   };
+
+  let allItems = [];
+  let lastEvaluatedKey = null;
+
   try {
-    const { Items } = await ddbDocClient.send(new ScanCommand(params));
-    return Items || [];
+    do {
+      if (lastEvaluatedKey) {
+        params.ExclusiveStartKey = lastEvaluatedKey;
+      }
+      const data = await ddbDocClient.send(new ScanCommand(params));
+
+      if (data.Items) {
+        allItems = allItems.concat(data.Items);
+      }
+
+      lastEvaluatedKey = data.LastEvaluatedKey;
+    } while (lastEvaluatedKey);
+
+    return allItems;
   } catch (error) {
     console.error("Error listing user data from DynamoDB:", error);
     throw error;
