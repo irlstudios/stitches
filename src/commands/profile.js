@@ -22,7 +22,7 @@ module.exports = {
       if (!config) {
         return interaction.reply({ content: 'An error occurred: configuration not found.', ephemeral: true });
       }
-      userData = await getUserData(guildId, userId);
+            userData = await getUserData(userId);
     } catch (error) {
       console.error(`Failed to load config or user data: ${error}`);
       return interaction.reply({ content: 'An error occurred while loading the profile data.', ephemeral: true });
