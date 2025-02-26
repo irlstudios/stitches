@@ -17,19 +17,19 @@ const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
  * @param {string} userId
  * @returns {Promise<Object|null>}
  */
+
 async function getUserData(userId) {
   const params = {
-    TableName: TABLE_NAME,
-    Key: {
-      DiscordId: userId
-    }
+    TableName: "DiscordAccounts",
+    Key: { "DiscordId": userId }
   };
+
   try {
-    const { Item } = await ddbDocClient.send(new GetCommand(params));
-    return Item ? Item : null;
+    const data = await ddbDocClient.send(new GetCommand(params));
+    return data.Item || null;
   } catch (error) {
-    console.error("Error retrieving user data from DynamoDB:", error);
-    throw error;
+    console.error("Error getting user data:", error);
+    return null;
   }
 }
 

@@ -1,4 +1,3 @@
-// src/index.js
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, Collection, REST, Routes, AttachmentBuilder } = require('discord.js');
 const interactionHandler = require('./interactionHandler');
