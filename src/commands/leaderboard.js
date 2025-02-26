@@ -5,21 +5,21 @@ const { getConfig } = require('../configManager');
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('leaderboard')
-    .setDescription('Display the leaderboard')
-    .addStringOption(option =>
-      option.setName('type')
-        .setDescription('The type of leaderboard to display')
-        .setRequired(true)
-        .addChoices(
-          { name: 'Streaks', value: 'streaks' },
-          { name: 'Messages', value: 'messages' },
-          { name: 'Highest Message Count', value: 'highestMessageCount' },
-          { name: 'Most Consecutive Leader Wins', value: 'mostConsecutiveLeader' },
-          { name: 'Average Messages Per Day', value: 'averageMessagesPerDay' },
-          { name: 'Levels', value: 'levels' }
-        )
-    ),
+      .setName('leaderboard')
+      .setDescription('Display the leaderboard')
+      .addStringOption(option =>
+          option.setName('type')
+              .setDescription('The type of leaderboard to display')
+              .setRequired(true)
+              .addChoices(
+                  { name: 'Streaks', value: 'streaks' },
+                  { name: 'Messages', value: 'messages' },
+                  { name: 'Highest Message Count', value: 'highestMessageCount' },
+                  { name: 'Most Consecutive Leader Wins', value: 'mostConsecutiveLeader' },
+                  { name: 'Average Messages Per Day', value: 'averageMessagesPerDay' },
+                  { name: 'Levels', value: 'levels' }
+              )
+      ),
   async execute(interaction) {
     try {
       const guildId = interaction.guild.id;
@@ -32,7 +32,10 @@ module.exports = {
       }
 
       await interaction.deferReply({ ephemeral: true });
-      const userDataArray = await listUserData(guildId);
+
+      const userDataArray = await listUserData();
+      console.log("🔍 Raw user data from DynamoDB:", JSON.stringify(userDataArray, null, 2));
+
       if (!userDataArray || userDataArray.length === 0) {
         return interaction.editReply({
           content: ':x: No user data available.',
@@ -40,9 +43,17 @@ module.exports = {
       }
 
       const currentMembers = await interaction.guild.members.fetch();
-      let userArray = userDataArray.filter(({ userId, userData }) =>
-        currentMembers.has(userId) && userData.messages > 0
-      );
+      console.log(`🔍 Fetched ${currentMembers.size} members from guild.`);
+
+      let userArray = userDataArray
+          .filter(user => user.DiscordId && currentMembers.has(user.DiscordId))
+          .map(user => ({
+            userId: user.DiscordId,
+            userData: user
+          }))
+          .filter(({ userData }) => userData.messages > 0);
+
+      console.log("🔍 Filtered user data:", JSON.stringify(userArray, null, 2));
 
       if (userArray.length === 0) {
         return interaction.editReply({
@@ -97,7 +108,7 @@ module.exports = {
           dataLabel = 'Average Messages Per Day:';
           userArrayForType = userArray.map(({ userId, userData }) => ({
             userId,
-            value: Math.round(userData.messages / userData.daysTracked || 0),
+            value: userData.daysTracked > 0 ? Math.round(userData.messages / userData.daysTracked) : 0,
           })).filter(user => user.value > 0);
           break;
         case 'levels':
@@ -130,29 +141,31 @@ module.exports = {
         const member = interaction.guild.members.cache.get(user.userId);
         return {
           top: index + 1,
-          avatar: member.user.displayAvatarURL({ format: 'png' }),
+          avatar: member ? member.user.displayAvatarURL({ format: 'png' }) : '',
           tag: member ? member.user.username : 'Unknown',
           score: user.value,
         };
       });
 
+      console.log("🏆 Leaderboard Data:", JSON.stringify(top10Users, null, 2));
+
       const top = await new canvafy.Top()
-        .setOpacity(0.6)
-        .setScoreMessage(dataLabel)
-        .setBackground(
-          'image',
-          'https://img.freepik.com/premium-vector/red-fog-smoke-isolated-transparent-background-red-cloudiness-mist-smog-background-vector-realistic-illustration_221648-615.jpg'
-        )
-        .setColors({
-          box: '#212121',
-          username: '#ffffff',
-          score: '#ffffff',
-          firstRank: '#f7c716',
-          secondRank: '#9e9e9e',
-          thirdRank: '#94610f',
-        })
-        .setUsersData(top10Users)
-        .build();
+          .setOpacity(0.6)
+          .setScoreMessage(dataLabel)
+          .setBackground(
+              'image',
+              'https://img.freepik.com/premium-vector/red-fog-smoke-isolated-transparent-background-red-cloudiness-mist-smog-background-vector-realistic-illustration_221648-615.jpg'
+          )
+          .setColors({
+            box: '#212121',
+            username: '#ffffff',
+            score: '#ffffff',
+            firstRank: '#f7c716',
+            secondRank: '#9e9e9e',
+            thirdRank: '#94610f',
+          })
+          .setUsersData(top10Users)
+          .build();
 
       const attachment = new AttachmentBuilder(top, { name: `top-${interaction.member.id}.png` });
 
@@ -161,10 +174,10 @@ module.exports = {
         files: [attachment],
       });
     } catch (error) {
-      console.error(`Error executing leaderboard command: ${error.message}`);
+      console.error(`❌ Error executing leaderboard command: ${error.message}`);
       if (!interaction.replied) {
         await interaction.editReply({
-          content: `An error occurred while processing the leaderboard command: ${error.message}`,
+          content: `❌ An error occurred while processing the leaderboard command: ${error.message}`,
         });
       }
     }
