@@ -1,0 +1,13 @@
+{
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.744.0",
+    "@aws-sdk/lib-dynamodb": "^3.744.0",
+    "@discordjs/builders": "^1.8.2",
+    "canvafy": "^7.1.0",
+    "discord.js": "^14.15.3",
+    "dotenv": "^16.4.5",
+    "fs-extra": "^11.2.0",
+    "lodash": "^4.17.21",
+    "node-cron": "^3.0.3"
+  }
+}
