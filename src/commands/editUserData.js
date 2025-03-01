@@ -1,6 +1,7 @@
 const { SlashCommandBuilder } = require('@discordjs/builders');
 const { PermissionsBitField } = require('discord.js');
-const { getUserData, updateUserData, getConfig } = require('../dynamoDB');
+const { getUserData, updateUserData } = require('../dynamoDB');
+const { getConfig } = require('../configManager');
 
 module.exports = {
   data: new SlashCommandBuilder()

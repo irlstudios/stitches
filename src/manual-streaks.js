@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
-const { getConfig, listUserData, updateUserData } = require('./dynamoDB');
+const { listUserData, updateUserData } = require('./dynamoDB');
+const { getConfig } = require('./configManager');
 
 const client = new Client({
     intents: [
