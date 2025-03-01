@@ -24,17 +24,13 @@ async function resetDailyForAllUsers() {
 
         console.log(`Total users retrieved: ${users.length}`);
 
-        // Print the first few users for debugging
-        console.log("Sample user data:", JSON.stringify(users.slice(0, 5), null, 2));
-
         for (const userEntry of users) {
             if (!userEntry || typeof userEntry !== 'object') {
                 console.warn("Skipping entry: Invalid structure", userEntry);
                 continue;
             }
 
-            const { userId, userData } = userEntry;
-
+            const userId = userEntry.userId || userEntry.DiscordId; // Fallback to DiscordId
             if (!userId || typeof userId !== 'string') {
                 console.warn("Skipping entry due to missing or invalid userId:", userEntry);
                 continue;
