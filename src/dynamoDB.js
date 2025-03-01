@@ -112,9 +112,42 @@ async function incrementMessageLeaderWins(userId) {
   }
 }
 
+/**
+ * Updates specific fields of a user's data without overwriting the entire record.
+ * @param {string} userId - The Discord user ID.
+ * @param {Object} updates - An object containing the fields to update.
+ */
+async function updateUserData(userId, updates) {
+  const updateExpressions = [];
+  const expressionAttributeValues = {};
+
+  Object.keys(updates).forEach((key) => {
+    updateExpressions.push(`#${key} = :${key}`);
+    expressionAttributeValues[`:${key}`] = updates[key];
+  });
+
+  const params = {
+    TableName: TABLE_NAME,
+    Key: { DiscordId: userId },
+    UpdateExpression: `SET ${updateExpressions.join(", ")}`,
+    ExpressionAttributeNames: Object.fromEntries(
+        Object.keys(updates).map((key) => [`#${key}`, key])
+    ),
+    ExpressionAttributeValues: expressionAttributeValues,
+  };
+
+  try {
+    await ddbDocClient.send(new UpdateCommand(params));
+  } catch (error) {
+    console.error(`Error updating user data for ${userId}:`, error);
+    throw error;
+  }
+}
+
 module.exports = {
   getUserData,
   saveUserData,
   listUserData,
-  incrementMessageLeaderWins
+  incrementMessageLeaderWins,
+  updateUserData
 };

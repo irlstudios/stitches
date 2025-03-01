@@ -6,7 +6,7 @@ const cron = require('node-cron');
 const path = require('path');
 const fs = require('fs');
 
-const { getUserData, saveUserData, listUserData } = require('./dynamoDB');
+const { incrementMessageLeaderWins, getUserData, saveUserData, listUserData, updateUserData } = require('./dynamoDB');
 const { getConfig, saveConfig } = require('./configManager');
 
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
@@ -192,40 +192,6 @@ client.on('guildCreate', async guild => {
 });
 
 // -------------------------
-// CACHE FLUSHING
-// -------------------------
-
-async function flushCacheToDynamo() {
-  for (const guildId in userMessageCache) {
-    const cachedUsers = userMessageCache[guildId];
-    for (const userId in cachedUsers) {
-      try {
-        let userData = await getUserData(userId);
-        if (!userData) {
-          userData = {
-            streak: 0,
-            highestStreak: 0,
-            messages: 0,
-            threshold: 0,
-            receivedDaily: false,
-            messageLeaderWins: 0,
-            highestMessageCount: 0,
-            mostConsecutiveLeader: 0,
-            averageMessagesPerDay: 0,
-            messagesInCurrentWeek: 0,
-          };
-        }
-        userData.messages += cachedUsers[userId].messages;
-        await saveUserData(userId, userData);
-      } catch (error) {
-        console.error(`Failed to flush cache for guild ${guildId} user ${userId}: ${error.message}`);
-      }
-    }
-    userMessageCache[guildId] = {};
-  }
-}
-
-// -------------------------
 // TIMEOUT HELPER
 // -------------------------
 
@@ -404,59 +370,6 @@ async function announceMessageLeaders() {
   }
 }
 
-
-
-async function generateWeeklyReport(guildId) {
-  try {
-    const config = await getConfig(guildId);
-    if (!config) return;
-    const users = await listUserData();
-    const totalMessages = users.reduce((acc, { userData }) => acc + (userData.messages || 0), 0);
-    const totalUsers = users.length;
-    const averageMessagesPerUser = (totalMessages / totalUsers).toFixed(2);
-    const guild = client.guilds.cache.get(guildId);
-    const reportChannelId = config.reportSettings.weeklyReportChannel;
-    const reportChannel = guild.channels.cache.get(reportChannelId);
-    if (!reportChannel || !reportChannel.isTextBased()) {
-      console.error(`Invalid weekly report channel for guild ${guildId}.`);
-      return;
-    }
-    const reportMessage = `**Weekly Report for ${guild.name}**\n\n` +
-      `- Total Messages: ${totalMessages}\n` +
-      `- Total Active Users: ${totalUsers}\n` +
-      `- Average Messages per User: ${averageMessagesPerUser}`;
-    await reportChannel.send(reportMessage);
-  } catch (error) {
-    console.error(`Error generating weekly report for guild ${guildId}: ${error.message}`);
-  }
-}
-
-async function generateMonthlyReport(guildId) {
-  try {
-    const config = await getConfig(guildId);
-    if (!config) return;
-    const users = await listUserData();
-    const totalMessages = users.reduce((acc, { userData }) => acc + (userData.messages || 0), 0);
-    const totalUsers = users.length;
-    const averageMessagesPerUser = (totalMessages / totalUsers).toFixed(2);
-    const guild = client.guilds.cache.get(guildId);
-    const reportChannelId = config.reportSettings.monthlyReportChannel;
-    const reportChannel = guild.channels.cache.get(reportChannelId);
-    if (!reportChannel || !reportChannel.isTextBased()) {
-      console.error(`Invalid monthly report channel for guild ${guildId}.`);
-      return;
-    }
-    const reportMessage = `**Monthly Report for ${guild.name}**\n\n` +
-      `- Total Messages: ${totalMessages}\n` +
-      `- Total Active Users: ${totalUsers}\n` +
-      `- Average Messages per User: ${averageMessagesPerUser}`;
-    await reportChannel.send(reportMessage);
-  } catch (error) {
-    console.error(`Error generating monthly report for guild ${guildId}: ${error.message}`);
-  }
-}
-
-5
 async function assignRole(guildId, userId, roleId) {
   try {
     const guild = client.guilds.cache.get(guildId);
@@ -629,27 +542,16 @@ async function handleUserMessage(guildId, userId, channel, message) {
     } else {
       userData.messageHeatmap.push({ date: today, messages: 1 });
     }
-    await saveUserData(userId, userData);
+    await updateUserData(userId, {
+      streak: userData.streak,
+      receivedDaily: true,
+      highestStreak: userData.highestStreak,
+      messages: userData.messages,
+      totalMessages: userData.totalMessages,
+    });
   } catch (error) {
     console.error(`Error handling user message for user ${userId} in guild ${guildId}: ${error.message}`);
   }
-}
-
-const { UpdateCommand } = require("@aws-sdk/lib-dynamodb");
-async function incrementMessageLeaderWins(guildId, userId) {
-  const params = {
-    TableName: process.env.DYNAMODB_TABLE,
-    Key: {
-      guildId,
-      dataType: `USER#${userId}`
-    },
-    UpdateExpression: "SET userData.messageLeaderWins = if_not_exists(userData.messageLeaderWins, :zero) + :inc",
-    ExpressionAttributeValues: {
-      ":inc": 1,
-      ":zero": 0
-    }
-  };
-  await ddbDocClient.send(new UpdateCommand(params));
 }
 
 async function resetDailyStreaks() {
@@ -665,7 +567,13 @@ async function resetDailyStreaks() {
         if (!userData.messageHeatmap.some(entry => entry.date === today)) {
           userData.messageHeatmap.push({ date: today, messages: 0 });
         }
-        if (userData.streak > 0 && !userData.receivedDaily && userData.threshold > 0) {
+        if (userData.receivedDaily) {
+          userData.receivedDaily = false;
+        }
+        if (userData.threshold !== messageThreshold) {
+          userData.threshold = messageThreshold;
+        }
+        if (userData.streak > 0 && userData.threshold > 0 && !userData.receivedDaily) {
           const oldStreak = userData.streak;
           userData.streak = 0;
           await removeStreakRoles(guildId, userId, config, oldStreak);
@@ -676,18 +584,20 @@ async function resetDailyStreaks() {
         userData.averageMessagesPerDay = userData.totalMessages / userData.daysTracked;
         userData.dailyMessageCount = 0;
         if (userData.dailyMessageCount === 0) {
-          const lastActiveDate = userData.messageHeatmap && userData.messageHeatmap.length > 0
-            ? new Date(userData.messageHeatmap[userData.messageHeatmap.length - 1].date)
-            : new Date();
+          const lastActiveDate = userData.messageHeatmap.length > 0
+              ? new Date(userData.messageHeatmap[userData.messageHeatmap.length - 1].date)
+              : new Date();
           const inactiveDays = Math.floor((new Date() - lastActiveDate) / (1000 * 60 * 60 * 24));
           userData.longestInactivePeriod = Math.max(userData.longestInactivePeriod || 0, inactiveDays);
         }
-        userData.threshold = messageThreshold;
-        userData.receivedDaily = false;
         if (new Date().getDay() === 0) {
           userData.messagesInCurrentWeek = 0;
         }
-        await saveUserData(userId, userData);
+        await updateUserData(userId, {
+          receivedDaily: false,
+          threshold: messageThreshold,
+          messagesInCurrentWeek: new Date().getDay() === 0 ? 0 : userData.messagesInCurrentWeek,
+        });
       }
     }
   } catch (error) {
@@ -777,30 +687,6 @@ async function sendConfigMessage(guild) {
 }
 
 // -------------------------
-// ROLE ASSIGNMENT HELPER (duplicate of our helper above)
-// -------------------------
-async function assignRole(guildId, userId, roleId) {
-  try {
-    const guild = client.guilds.cache.get(guildId);
-    const member = await guild.members.fetch(userId);
-    if (member && roleId) {
-      const role = guild.roles.cache.get(roleId);
-      if (role) {
-        await member.roles.add(role);
-        return role;
-      } else {
-        console.warn(`Role with ID ${roleId} not found in guild ${guildId}`);
-      }
-    } else {
-      console.warn(`Member with ID ${userId} not found in guild ${guildId}`);
-    }
-  } catch (error) {
-    console.error(`Failed to assign role ${roleId} to user ${userId} in guild ${guildId}: ${error.message}`);
-  }
-  return null;
-}
-
-// -------------------------
 // REPORT GENERATION
 // -------------------------
 
@@ -854,7 +740,7 @@ async function generateMonthlyReport(guildId) {
   }
 }
 
-client.on('guildMemberRemove', async (member) => {
+client.on('guildMemberRemove', async () => {
   // when becomes necessary add logic here to keep things clean,
 });
 
