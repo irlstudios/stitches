@@ -26,7 +26,6 @@ async function getUserData(userId) {
 
   try {
     const data = await ddbDocClient.send(new GetCommand(params));
-    console.log("DynamoDB Get Response:", JSON.stringify(data, null, 2));
     return data.Item || null;
   } catch (error) {
     console.error("Error getting user data:", error);

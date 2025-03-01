@@ -1,4 +1,3 @@
-// src/interactionHandler.js
 const { Collection, StringSelectMenuBuilder, ActionRowBuilder } = require('discord.js');
 const { set } = require('lodash');
 const { getConfig, saveConfig } = require('./configManager');

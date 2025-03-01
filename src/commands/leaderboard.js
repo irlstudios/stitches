@@ -34,7 +34,6 @@ module.exports = {
       await interaction.deferReply({ ephemeral: true });
 
       const userDataArray = await listUserData();
-      console.log("🔍 Raw user data from DynamoDB:", JSON.stringify(userDataArray, null, 2));
 
       if (!userDataArray || userDataArray.length === 0) {
         return interaction.editReply({
@@ -43,7 +42,6 @@ module.exports = {
       }
 
       const currentMembers = await interaction.guild.members.fetch();
-      console.log(`🔍 Fetched ${currentMembers.size} members from guild.`);
 
       let userArray = userDataArray
           .filter(user => user.DiscordId && currentMembers.has(user.DiscordId))
@@ -52,8 +50,6 @@ module.exports = {
             userData: user
           }))
           .filter(({ userData }) => userData.messages > 0);
-
-      console.log("🔍 Filtered user data:", JSON.stringify(userArray, null, 2));
 
       if (userArray.length === 0) {
         return interaction.editReply({
@@ -146,8 +142,6 @@ module.exports = {
           score: user.value,
         };
       });
-
-      console.log("🏆 Leaderboard Data:", JSON.stringify(top10Users, null, 2));
 
       const top = await new canvafy.Top()
           .setOpacity(0.6)
