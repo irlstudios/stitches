@@ -3,20 +3,20 @@ const { getUserData, saveUserData, listUserData } = require('../dynamoDB');
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('resetmessages')
-    .setDescription('Reset message counts for a user or the entire server.')
-    .addSubcommand(subcommand =>
-      subcommand
-        .setName('user')
-        .setDescription('Reset message count for a specific user.')
-        .addUserOption(option =>
-          option.setName('target')
-            .setDescription('The user to reset message count for')
-            .setRequired(true)))
-    .addSubcommand(subcommand =>
-      subcommand
-        .setName('server')
-        .setDescription('Reset message counts for all users in the server.')),
+      .setName('resetmessages')
+      .setDescription('Reset message counts for a user or the entire server.')
+      .addSubcommand(subcommand =>
+          subcommand
+              .setName('user')
+              .setDescription('Reset message count for a specific user.')
+              .addUserOption(option =>
+                  option.setName('target')
+                      .setDescription('The user to reset message count for')
+                      .setRequired(true)))
+      .addSubcommand(subcommand =>
+          subcommand
+              .setName('server')
+              .setDescription('Reset message counts for all users in the server.')),
   async execute(interaction) {
     if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
       return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });

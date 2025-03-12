@@ -3,19 +3,19 @@ const { getConfig, saveConfig } = require('../configManager');
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('setup-bot')
-    .setDescription('Sets up the necessary channels, roles, and categories for the Streak Bot')
-    .addStringOption(option =>
-      option.setName('system')
-        .setDescription('Select which system to set up')
-        .setRequired(true)
-        .addChoices(
-          { name: 'Streak System', value: 'streak-system' },
-          { name: 'Message Leader System', value: 'message-leader-system' },
-          { name: 'Level System', value: 'level-system' },
-          { name: 'All Systems', value: 'all-systems' }
-        )
-    ),
+      .setName('setup-bot')
+      .setDescription('Sets up the necessary channels, roles, and categories for the Streak Bot')
+      .addStringOption(option =>
+          option.setName('system')
+              .setDescription('Select which system to set up')
+              .setRequired(true)
+              .addChoices(
+                  { name: 'Streak System', value: 'streak-system' },
+                  { name: 'Message Leader System', value: 'message-leader-system' },
+                  { name: 'Level System', value: 'level-system' },
+                  { name: 'All Systems', value: 'all-systems' }
+              )
+      ),
   async execute(interaction) {
     try {
       if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {

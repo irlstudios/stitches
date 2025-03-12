@@ -30,7 +30,7 @@ async function resetDailyForAllUsers() {
                 continue;
             }
 
-            const userId = userEntry.userId || userEntry.DiscordId; // Fallback to DiscordId
+            const userId = userEntry.userId || userEntry.DiscordId;
             if (!userId || typeof userId !== 'string') {
                 console.warn("Skipping entry due to missing or invalid userId:", userEntry);
                 continue;

@@ -1,0 +1,113 @@
+[
+  {
+    "DiscordId": "123456789012345678",
+    "userData": {
+      "streak": 5,
+      "highestStreak": 10,
+      "messages": 500,
+      "threshold": 10,
+      "receivedDaily": false,
+      "messageLeaderWins": 3,
+      "highestMessageCount": 100,
+      "mostConsecutiveLeader": 2,
+      "totalMessages": 500,
+      "daysTracked": 30,
+      "averageMessagesPerDay": 16.67,
+      "activeDaysCount": 25,
+      "longestInactivePeriod": 1,
+      "messageHeatmap": [
+        { "date": "2025-01-21", "messages": 0 },
+        { "date": "2025-01-22", "messages": 0 }
+      ],
+      "milestones": [
+        { "milestone": 5, "date": "2025-01-21T00:00:00Z" }
+      ],
+      "rolesAchieved": [ "roleId1", "roleId2" ],
+      "experience": { "totalXp": 150, "level": 3 },
+      "boosters": 1,
+      "lastMessage": { "time": 1740117430246, "content": "Hello", "date": "2025-01-21" },
+      "channelsParticipated": [ "channelId1", "channelId2" ],
+      "mentionsRepliesCount": { "mentions": 2, "replies": 1 }
+    }
+  },
+  {
+    "DiscordAccount": "123456789012345678#messages",
+    "attribute": "messages",
+    "count": 500,
+    "discordAccountId": "123456789012345678",
+    "lastUpdated": "2025-03-11T00:00:00.000Z",
+    "expireAt": 1741670400
+  },
+  {
+    "DiscordAccount": "123456789012345678#streaks",
+    "attribute": "streaks",
+    "count": 10,
+    "discordAccountId": "123456789012345678",
+    "lastUpdated": "2025-03-11T00:00:00.000Z",
+    "expireAt": 1741670400
+  },
+  {
+    "DiscordAccount": "123456789012345678#highestStreak",
+    "attribute": "highestStreak",
+    "count": 15,
+    "discordAccountId": "123456789012345678",
+    "lastUpdated": "2025-03-11T00:00:00.000Z",
+    "expireAt": 1741670400
+  },
+  {
+    "DiscordAccount": "123456789012345678#messageLeaderWins",
+    "attribute": "messageLeaderWins",
+    "count": 5,
+    "discordAccountId": "123456789012345678",
+    "lastUpdated": "2025-03-11T00:00:00.000Z",
+    "expireAt": 1741670400
+  },
+  {
+    "DiscordAccount": "123456789012345678#totalXp",
+    "attribute": "totalXp",
+    "count": 12345,
+    "discordAccountId": "123456789012345678",
+    "lastUpdated": "2025-03-11T00:00:00.000Z",
+    "expireAt": 1741670400
+  },
+  {
+    "DiscordAccount": "123456789012345678#level",
+    "attribute": "level",
+    "count": 7,
+    "discordAccountId": "123456789012345678",
+    "lastUpdated": "2025-03-11T00:00:00.000Z",
+    "expireAt": 1741670400
+  },
+  {
+    "DiscordAccount": "123456789012345678#activeDaysCount",
+    "attribute": "activeDaysCount",
+    "count": 30,
+    "discordAccountId": "123456789012345678",
+    "lastUpdated": "2025-03-11T00:00:00.000Z",
+    "expireAt": 1741670400
+  },
+  {
+    "DiscordAccount": "123456789012345678#longestInactivePeriod",
+    "attribute": "longestInactivePeriod",
+    "count": 2,
+    "discordAccountId": "123456789012345678",
+    "lastUpdated": "2025-03-11T00:00:00.000Z",
+    "expireAt": 1741670400
+  },
+  {
+    "DiscordAccount": "123456789012345678#mostConsecutiveLeader",
+    "attribute": "mostConsecutiveLeader",
+    "count": 3,
+    "discordAccountId": "123456789012345678",
+    "lastUpdated": "2025-03-11T00:00:00.000Z",
+    "expireAt": 1741670400
+  },
+  {
+    "DiscordAccount": "123456789012345678#averageMessagesPerDay",
+    "attribute": "averageMessagesPerDay",
+    "count": 12,
+    "discordAccountId": "123456789012345678",
+    "lastUpdated": "2025-03-11T00:00:00.000Z",
+    "expireAt": 1741670400
+  }
+]

@@ -56,13 +56,17 @@ module.exports = {
       messageHeatmap: []
     };
 
-    let updateFields = {};
+    const updateFields = {};
 
     if (['messages', 'streak', 'level', 'activeDaysCount', 'longestInactivePeriod'].includes(field)) {
       if (isNaN(value) || parseInt(value, 10) < 0) {
         return interaction.reply({ content: 'Please enter a valid number for this field.', ephemeral: true });
       }
-      updateFields[field] = parseInt(value, 10);
+      if (field === 'level') {
+        updateFields['experience.level'] = parseInt(value, 10);
+      } else {
+        updateFields[field] = parseInt(value, 10);
+      }
     } else if (field === 'threshold') {
       if (isNaN(value) || parseInt(value, 10) < 0 || parseInt(value, 10) > (config.streakSystem?.streakThreshold || 10)) {
         return interaction.reply({ content: `Please enter a valid number for the threshold, not exceeding ${config.streakSystem?.streakThreshold || 10}.`, ephemeral: true });
@@ -100,9 +104,8 @@ module.exports = {
     if (field === 'level') {
       const newLevel = parseInt(value, 10);
       const oldLevel = userData.experience.level;
-      updateFields["experience.level"] = newLevel;
       const xpRequired = Math.floor(100 * Math.pow(config.levelSystem.levelMultiplier, newLevel));
-      updateFields["experience.totalXp"] = Math.min(userData.experience.totalXp, xpRequired - 1);
+      updateFields['experience.totalXp'] = Math.min(userData.experience.totalXp, xpRequired - 1);
 
       for (let i = 1; i <= oldLevel; i++) {
         const roleKey = `roleLevel${i}`;

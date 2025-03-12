@@ -1,7 +1,14 @@
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, QueryCommand } = require('@aws-sdk/lib-dynamodb');
 const canvafy = require('canvafy');
-const { listUserData } = require('../dynamoDB');
 const { getConfig } = require('../configManager');
+
+const TABLE_NAME = 'DiscordAccounts';
+const ATTRIBUTE_INDEX = "NameOfIndex";
+
+const ddbClient = new DynamoDBClient({});
+const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -14,10 +21,10 @@ module.exports = {
               .addChoices(
                   { name: 'Streaks', value: 'streaks' },
                   { name: 'Messages', value: 'messages' },
-                  { name: 'Highest Message Count', value: 'highestMessageCount' },
-                  { name: 'Most Consecutive Leader Wins', value: 'mostConsecutiveLeader' },
+                  { name: 'Highest Streak', value: 'highestStreak' },
+                  { name: 'Message Leader Wins', value: 'messageLeaderWins' },
                   { name: 'Average Messages Per Day', value: 'averageMessagesPerDay' },
-                  { name: 'Levels', value: 'levels' }
+                  { name: 'Level', value: 'level' }
               )
       ),
   async execute(interaction) {
@@ -33,119 +40,41 @@ module.exports = {
 
       await interaction.deferReply({ ephemeral: true });
 
-      const userDataArray = await listUserData();
+      const type = interaction.options.getString('type');
+      const leaderboardItems = await queryByAttribute(type);
 
-      if (!userDataArray || userDataArray.length === 0) {
+      if (!leaderboardItems || leaderboardItems.length === 0) {
         return interaction.editReply({
-          content: ':x: No user data available.',
+          content: `:x: No data found for **${type}**.`
         });
       }
 
       const currentMembers = await interaction.guild.members.fetch();
+      const filteredItems = leaderboardItems.filter(item =>
+          item.discordAccountId && currentMembers.has(item.discordAccountId)
+      );
 
-      let userArray = userDataArray
-          .filter(user => user.DiscordId && currentMembers.has(user.DiscordId))
-          .map(user => ({
-            userId: user.DiscordId,
-            userData: user
-          }))
-          .filter(({ userData }) => userData.messages > 0);
-
-      if (userArray.length === 0) {
+      if (filteredItems.length === 0) {
         return interaction.editReply({
-          content: ':x: There are no users in the database yet to display!',
+          content: `:x: No members in this server have **${type}** data.`
         });
       }
 
-      const type = interaction.options.getString('type');
-      let dataLabel;
-      let userArrayForType;
+      filteredItems.sort((a, b) => b.count - a.count);
 
-      switch (type) {
-        case 'streaks':
-          if (!config.streakSystem?.enabled) {
-            return interaction.editReply({
-              content: ':x: The Streaks system is not enabled in this server.',
-            });
-          }
-          dataLabel = 'Streaks:';
-          userArrayForType = userArray.map(({ userId, userData }) => ({
-            userId,
-            value: userData.streak,
-          })).filter(user => user.value > 0);
-          break;
-        case 'messages':
-          if (!config.messageLeaderSystem?.enabled) {
-            return interaction.editReply({
-              content: ':x: The Message Leader system is not enabled in this server.',
-            });
-          }
-          dataLabel = 'Messages:';
-          userArrayForType = userArray.map(({ userId, userData }) => ({
-            userId,
-            value: userData.messages,
-          })).filter(user => user.value > 0);
-          break;
-        case 'highestMessageCount':
-          dataLabel = 'Highest Message Count:';
-          userArrayForType = userArray.map(({ userId, userData }) => ({
-            userId,
-            value: userData.totalMessages || 0,
-          })).filter(user => user.value > 0);
-          break;
-        case 'mostConsecutiveLeader':
-          dataLabel = 'Most Consecutive Leader Wins:';
-          userArrayForType = userArray.map(({ userId, userData }) => ({
-            userId,
-            value: userData.mostConsecutiveLeader || 0,
-          })).filter(user => user.value > 0);
-          break;
-        case 'averageMessagesPerDay':
-          dataLabel = 'Average Messages Per Day:';
-          userArrayForType = userArray.map(({ userId, userData }) => ({
-            userId,
-            value: userData.daysTracked > 0 ? Math.round(userData.messages / userData.daysTracked) : 0,
-          })).filter(user => user.value > 0);
-          break;
-        case 'levels':
-          if (!config.levelSystem?.enabled) {
-            return interaction.editReply({
-              content: ':x: The Level system is not enabled in this server.',
-            });
-          }
-          dataLabel = 'Levels:';
-          userArrayForType = userArray.map(({ userId, userData }) => ({
-            userId,
-            value: userData.experience.level || 0,
-          })).filter(user => user.value > 0);
-          break;
-        default:
-          return interaction.editReply({
-            content: ':x: Invalid leaderboard type selected.',
-          });
-      }
-
-      if (userArrayForType.length === 0) {
-        return interaction.editReply({
-          content: ':x: There are no users with relevant data for this leaderboard.',
-        });
-      }
-
-      userArrayForType.sort((a, b) => b.value - a.value);
-
-      const top10Users = userArrayForType.slice(0, 10).map((user, index) => {
-        const member = interaction.guild.members.cache.get(user.userId);
+      const top10 = filteredItems.slice(0, 10).map((item, index) => {
+        const member = interaction.guild.members.cache.get(item.discordAccountId);
         return {
           top: index + 1,
           avatar: member ? member.user.displayAvatarURL({ format: 'png' }) : '',
           tag: member ? member.user.username : 'Unknown',
-          score: user.value,
+          score: item.count
         };
       });
 
-      const top = await new canvafy.Top()
+      const scoreboard = await new canvafy.Top()
           .setOpacity(0.6)
-          .setScoreMessage(dataLabel)
+          .setScoreMessage(`${type.charAt(0).toUpperCase() + type.slice(1)}:`)
           .setBackground(
               'image',
               'https://img.freepik.com/premium-vector/red-fog-smoke-isolated-transparent-background-red-cloudiness-mist-smog-background-vector-realistic-illustration_221648-615.jpg'
@@ -158,13 +87,13 @@ module.exports = {
             secondRank: '#9e9e9e',
             thirdRank: '#94610f',
           })
-          .setUsersData(top10Users)
+          .setUsersData(top10)
           .build();
 
-      const attachment = new AttachmentBuilder(top, { name: `top-${interaction.member.id}.png` });
+      const attachment = new AttachmentBuilder(scoreboard, { name: `leaderboard-${interaction.user.id}.png` });
 
       await interaction.editReply({
-        content: "Here's your private leaderboard:",
+        content: `Here is the **${type}** leaderboard:`,
         files: [attachment],
       });
     } catch (error) {
@@ -177,3 +106,24 @@ module.exports = {
     }
   },
 };
+
+async function queryByAttribute(attributeValue) {
+  try {
+    const params = {
+      TableName: TABLE_NAME,
+      IndexName: ATTRIBUTE_INDEX,
+      KeyConditionExpression: '#attr = :val',
+      ExpressionAttributeNames: {
+        '#attr': 'attribute'
+      },
+      ExpressionAttributeValues: {
+        ':val': attributeValue
+      }
+    };
+    const data = await ddbDocClient.send(new QueryCommand(params));
+    return data.Items || [];
+  } catch (error) {
+    console.error(`Error querying by attribute "${attributeValue}":`, error);
+    return [];
+  }
+}

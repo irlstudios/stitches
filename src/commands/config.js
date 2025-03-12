@@ -2,8 +2,8 @@ const { SlashCommandBuilder, ActionRowBuilder, StringSelectMenuBuilder, Permissi
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('stitches-configuration')
-    .setDescription('Configure the streak system, message leader system, or level system.'),
+      .setName('stitches-configuration')
+      .setDescription('Configure the streak system, message leader system, or level system.'),
   async execute(interaction) {
     try {
       if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
@@ -12,16 +12,19 @@ module.exports = {
           ephemeral: true,
         });
       }
+
       const selectMenu = new StringSelectMenuBuilder()
-        .setCustomId('system-select')
-        .setPlaceholder('Select the system to configure')
-        .addOptions([
-          { label: 'Streak System', value: 'streakSystem' },
-          { label: 'Message Leader System', value: 'messageLeaderSystem' },
-          { label: 'Level System', value: 'levelSystem' },
-          { label: 'Analytics System', value: 'weeklyReportSystem' }
-        ]);
+          .setCustomId('system-select')
+          .setPlaceholder('Select the system to configure')
+          .addOptions([
+            { label: 'Streak System', value: 'streakSystem' },
+            { label: 'Message Leader System', value: 'messageLeaderSystem' },
+            { label: 'Level System', value: 'levelSystem' },
+            { label: 'Analytics System', value: 'weeklyReportSystem' }
+          ]);
+
       const row = new ActionRowBuilder().addComponents(selectMenu);
+
       await interaction.reply({
         content: 'Please select the system you want to configure:',
         components: [row],

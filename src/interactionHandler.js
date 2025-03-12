@@ -14,9 +14,11 @@ module.exports = async (client, interaction) => {
           ephemeral: true,
         });
       }
+
       const now = Date.now();
       const cooldownAmount = 3000;
       const timestamps = cooldowns.get(interaction.user.id);
+
       if (timestamps) {
         const expirationTime = timestamps + cooldownAmount;
         if (now < expirationTime) {
@@ -27,14 +29,17 @@ module.exports = async (client, interaction) => {
           });
         }
       }
+
       cooldowns.set(interaction.user.id, now);
       setTimeout(() => cooldowns.delete(interaction.user.id), cooldownAmount);
+
       try {
         await command.execute(interaction);
       } catch (error) {
         console.error(`Error executing command ${interaction.commandName}:`, error);
         handleInteractionError(interaction, 'There was an error while executing this command!');
       }
+
     } else if (interaction.isStringSelectMenu()) {
       const { guild, customId } = interaction;
       if (!guild) {
@@ -43,7 +48,7 @@ module.exports = async (client, interaction) => {
           ephemeral: true,
         });
       }
-      // Load configuration from DynamoDB.
+
       let config;
       try {
         config = await getConfig(guild.id);
@@ -60,7 +65,9 @@ module.exports = async (client, interaction) => {
           ephemeral: true,
         });
       }
+
       ensureConfigStructure(config);
+
       try {
         if (customId === 'system-select') {
           await handleSystemSelect(interaction, config, guild);
@@ -137,6 +144,7 @@ function ensureConfigStructure(config) {
 async function handleSystemSelect(interaction, config, guild) {
   const system = interaction.values[0];
   let menu, content;
+
   if (system === 'streakSystem') {
     menu = new StringSelectMenuBuilder()
         .setCustomId('streak-options')
@@ -187,19 +195,24 @@ async function handleSystemSelect(interaction, config, guild) {
           { label: 'Weekly Report Channel', value: 'weeklyReportChannel' },
           { label: 'Monthly Report Channel', value: 'monthlyReportChannel' }
         ]);
+    content = 'Configure the Analytics System:';
   }
+
   const row = new ActionRowBuilder().addComponents(menu);
   await interaction.update({ content, components: [row] });
 }
 
 async function handleStreakOptions(interaction, config, guild) {
   const option = interaction.values[0];
+
   if (option === 'viewStreakConfig') {
     await interaction.reply({
-      content: `Current Streak System Config:\nEnabled: ${config.streakSystem.enabled}\nThreshold: ${config.streakSystem.streakThreshold}\nMilestones: ${Object.keys(config.streakSystem)
-          .filter(key => key.startsWith('role') && key.endsWith('day'))
-          .map(key => `${key.replace('role', '').replace('day', '')} days`)
-          .join(', ')}`,
+      content: `Current Streak System Config:\nEnabled: ${config.streakSystem.enabled}\nThreshold: ${config.streakSystem.streakThreshold}\nMilestones: ${
+          Object.keys(config.streakSystem)
+              .filter(key => key.startsWith('role') && key.endsWith('day'))
+              .map(key => `${key.replace('role', '').replace('day', '')} days`)
+              .join(', ')
+      }`,
       ephemeral: true,
     });
   } else if (option === 'addMilestone') {
@@ -219,6 +232,7 @@ async function handleStreakOptions(interaction, config, guild) {
 
 async function handleLeaderOptions(interaction, config, guild) {
   const option = interaction.values[0];
+
   if (option === 'viewLeaderConfig') {
     await interaction.reply({
       content: `Current Message Leader System Config:\nEnabled: ${config.messageLeaderSystem.enabled}\nAnnouncement Channel: <#${config.messageLeaderSystem.channelMessageLeader || 'Not Set'}>\nWinner Role: <@&${config.messageLeaderSystem.roleMessageLeader || 'Not Set'}>`,
@@ -237,12 +251,15 @@ async function handleLeaderOptions(interaction, config, guild) {
 
 async function handleLevelOptions(interaction, config, guild) {
   const option = interaction.values[0];
+
   if (option === 'viewLevelConfig') {
     await interaction.reply({
-      content: `Current Level System Config:\nEnabled: ${config.levelSystem.enabled}\nXP per Message: ${config.levelSystem.xpPerMessage}\nXP Increment: ${config.levelSystem.levelMultiplier}\nLevel-Up Message Channel: <#${config.levelSystem.channelLevelUp || 'Not Set'}>\nMilestones: ${Object.keys(config.levelSystem)
-          .filter(key => key.startsWith('role') && key.startsWith('Level'))
-          .map(key => `${key.replace('role', '').replace('Level', '')} Level`)
-          .join(', ')}`,
+      content: `Current Level System Config:\nEnabled: ${config.levelSystem.enabled}\nXP per Message: ${config.levelSystem.xpPerMessage}\nXP Increment: ${config.levelSystem.levelMultiplier}\nLevel-Up Message Channel: <#${config.levelSystem.channelLevelUp || 'Not Set'}>\nMilestones: ${
+          Object.keys(config.levelSystem)
+              .filter(key => key.startsWith('role') && key.includes('Level'))
+              .map(key => `${key.replace('roleLevel', 'Level ')}`)
+              .join(', ')
+      }`,
       ephemeral: true,
     });
   } else if (option === 'enableLevel' || option === 'disableLevel') {
@@ -264,6 +281,7 @@ async function handleLevelOptions(interaction, config, guild) {
 
 async function handleReportOptions(interaction, config, guild) {
   const option = interaction.values[0];
+
   if (option === 'viewReportConfig') {
     await interaction.reply({
       content: `Current Report Settings:\nWeekly Report Channel: <#${config.reportSettings.weeklyReportChannel || 'Not Set'}>\nMonthly Report Channel: <#${config.reportSettings.monthlyReportChannel || 'Not Set'}>`,
@@ -279,9 +297,12 @@ async function handleReportOptions(interaction, config, guild) {
 async function setChannel(interaction, guild, config, guildId, configKey, description) {
   await interaction.deferReply({ ephemeral: true });
   await interaction.followUp({ content: `Please mention the channel for ${description} (e.g., #channel-name):` });
+
   const filter = (msg) =>
       msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;
+
   const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
+
   collector.on('collect', async (msg) => {
     const channel = msg.mentions.channels.first();
     await msg.delete();
@@ -293,6 +314,7 @@ async function setChannel(interaction, guild, config, guildId, configKey, descri
       await interaction.followUp({ content: `${description} has been set to ${channel.name}.`, ephemeral: true });
     }
   });
+
   collector.on('end', (collected) => {
     if (collected.size === 0) {
       interaction.followUp({ content: 'Time ran out. Please try the command again.', ephemeral: true });
@@ -303,11 +325,14 @@ async function setChannel(interaction, guild, config, guildId, configKey, descri
 async function setThreshold(interaction, config, guildId, configKey, description) {
   await interaction.deferReply({ ephemeral: true });
   await interaction.followUp({ content: `Please enter the ${description}:` });
+
   const filter = (msg) =>
       msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;
+
   const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
+
   collector.on('collect', async (msg) => {
-    const value = parseInt(msg.content, 10);
+    const value = parseFloat(msg.content);
     await msg.delete();
     if (isNaN(value) || value <= 0) {
       await interaction.followUp({ content: 'Please provide a valid number.', ephemeral: true });
@@ -317,6 +342,7 @@ async function setThreshold(interaction, config, guildId, configKey, description
       await interaction.followUp({ content: `${description} has been set to ${value}.`, ephemeral: true });
     }
   });
+
   collector.on('end', (collected) => {
     if (collected.size === 0) {
       interaction.followUp({ content: 'Time ran out. Please try the command again.', ephemeral: true });
@@ -327,8 +353,12 @@ async function setThreshold(interaction, config, guildId, configKey, description
 async function setRole(interaction, guild, config, guildId, configKey, description) {
   await interaction.deferReply({ ephemeral: true });
   await interaction.followUp({ content: `Please mention the role for ${description} (e.g., @role-name):` });
+
   const filter = (msg) =>
-      msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;  const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
+      msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;
+
+  const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
+
   collector.on('collect', async (msg) => {
     const role = msg.mentions.roles.first();
     await msg.delete();
@@ -340,6 +370,7 @@ async function setRole(interaction, guild, config, guildId, configKey, descripti
       await interaction.followUp({ content: `${description} has been set to ${role.name}.`, ephemeral: true });
     }
   });
+
   collector.on('end', (collected) => {
     if (collected.size === 0) {
       interaction.followUp({ content: 'Time ran out. Please try the command again.', ephemeral: true });
@@ -349,9 +380,13 @@ async function setRole(interaction, guild, config, guildId, configKey, descripti
 
 async function addMilestone(interaction, guild, config, guildId, systemType) {
   await interaction.deferReply({ ephemeral: true });
-  await interaction.followUp({ content: `Please enter the number of days/level for the milestone (e.g., 5 for 5-day streak or Level 5):` });
+  await interaction.followUp({ content: `Please enter the number of days/level for the milestone (e.g., 5 for 5-day streak or 5 for Level 5):` });
+
   const filter = (msg) =>
-      msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;  const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
+      msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;
+
+  const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
+
   collector.on('collect', async (msg) => {
     const milestone = parseInt(msg.content, 10);
     await msg.delete();
@@ -367,14 +402,21 @@ async function addMilestone(interaction, guild, config, guildId, systemType) {
           reason: `Role for users with a ${milestone}-day streak or reaching Level ${milestone}`,
         });
       }
-      config[systemType === 'streak' ? 'streakSystem' : 'levelSystem'][`role${milestone}${systemType === 'streak' ? 'day' : ''}`] = milestoneRole.id;
+
+      if (systemType === 'streak') {
+        config.streakSystem[`role${milestone}day`] = milestoneRole.id;
+      } else {
+        config.levelSystem[`roleLevel${milestone}`] = milestoneRole.id;
+      }
+
       await saveConfig(guildId, config);
       await interaction.followUp({
-        content: `Milestone for ${milestone} ${systemType === 'streak' ? 'days' : 'level'} has been added and roles assigned to those who have met the criteria.`,
+        content: `Milestone for ${milestone} ${systemType === 'streak' ? 'days' : 'level'} has been added.`,
         ephemeral: true,
       });
     }
   });
+
   collector.on('end', (collected) => {
     if (collected.size === 0) {
       interaction.followUp({ content: 'Time ran out. Please try the command again.', ephemeral: true });
@@ -385,8 +427,12 @@ async function addMilestone(interaction, guild, config, guildId, systemType) {
 async function removeMilestone(interaction, guild, config, guildId, systemType) {
   await interaction.deferReply({ ephemeral: true });
   await interaction.followUp({ content: `Please enter the number of days/level for the milestone to remove:` });
+
   const filter = (msg) =>
-      msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;  const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
+      msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;
+
+  const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
+
   collector.on('collect', async (msg) => {
     const milestone = parseInt(msg.content, 10);
     await msg.delete();
@@ -394,15 +440,25 @@ async function removeMilestone(interaction, guild, config, guildId, systemType) 
       await interaction.followUp({ content: 'Please provide a valid number.', ephemeral: true });
     } else {
       const roleKey = systemType === 'streak' ? `role${milestone}day` : `roleLevel${milestone}`;
-      const milestoneRoleId = config[systemType === 'streak' ? 'streakSystem' : 'levelSystem'][roleKey];
+      const milestoneRoleId = systemType === 'streak'
+          ? config.streakSystem[roleKey]
+          : config.levelSystem[roleKey];
+
       if (!milestoneRoleId) {
         return interaction.followUp({ content: `No milestone for ${milestone} ${systemType === 'streak' ? 'days' : 'level'} found.`, ephemeral: true });
       }
+
       const milestoneRole = guild.roles.cache.get(milestoneRoleId);
       if (milestoneRole) {
         await milestoneRole.delete();
       }
-      delete config[systemType === 'streak' ? 'streakSystem' : 'levelSystem'][roleKey];
+
+      if (systemType === 'streak') {
+        delete config.streakSystem[roleKey];
+      } else {
+        delete config.levelSystem[roleKey];
+      }
+
       await saveConfig(guildId, config);
       await interaction.followUp({
         content: `Milestone for ${milestone} ${systemType === 'streak' ? 'days' : 'level'} has been removed.`,
@@ -410,17 +466,10 @@ async function removeMilestone(interaction, guild, config, guildId, systemType) 
       });
     }
   });
+
   collector.on('end', (collected) => {
     if (collected.size === 0) {
       interaction.followUp({ content: 'Time ran out. Please try the command again.', ephemeral: true });
     }
   });
-}
-
-async function assignRole(guildId, userId, roleId) {
-  const guild = client.guilds.cache.get(guildId);
-  const member = await guild.members.fetch(userId);
-  if (member && roleId && !member.roles.cache.has(roleId)) {
-    await member.roles.add(roleId);
-  }
 }

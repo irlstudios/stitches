@@ -13,18 +13,18 @@ const TABLE_NAME = process.env.DYNAMODB_TABLE || "DiscordAccounts";
 const ddbClient = new DynamoDBClient({});
 const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
 
-/**
- * @param {string} userId
- * @returns {Promise<Object|null>}
- */
+function getNextMidnightTimestamp() {
+  const now = new Date();
+  const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  return Math.floor(nextMidnight.getTime() / 1000);
+}
 
-async function getUserData(userId) {
-  const params = {
-    TableName: "DiscordAccounts",
-    Key: { "DiscordId": String(userId) }
-  };
-
+async function getUserData(guildId, userId) {
   try {
+    const params = {
+      TableName: TABLE_NAME,
+      Key: { DiscordId: String(userId) }
+    };
     const data = await ddbDocClient.send(new GetCommand(params));
     return data.Item || null;
   } catch (error) {
@@ -33,20 +33,18 @@ async function getUserData(userId) {
   }
 }
 
-/**
- * @param {string} userId
- * @param {Object} userData
- * @returns {Promise<void>}
- */
-async function saveUserData(userId, userData) {
-  const params = {
-    TableName: TABLE_NAME,
-    Item: {
-      DiscordId: userId,
-      ...userData
-    }
-  };
+async function saveUserData(guildId, userId, userData) {
+  userData.lastUpdated = new Date().toISOString();
+  userData.expireAt = getNextMidnightTimestamp();
+
   try {
+    const params = {
+      TableName: TABLE_NAME,
+      Item: {
+        DiscordId: String(userId),
+        ...userData
+      }
+    };
     await ddbDocClient.send(new PutCommand(params));
   } catch (error) {
     console.error("Error saving user data to DynamoDB:", error);
@@ -54,18 +52,8 @@ async function saveUserData(userId, userData) {
   }
 }
 
-/**
- * @returns {Promise<Array>}
- */
-/**
- * Retrieves all user data from DynamoDB, handling pagination.
- * @returns {Promise<Array>}
- */
-async function listUserData() {
-  const params = {
-    TableName: TABLE_NAME
-  };
-
+async function listUserData(guildId) {
+  const params = { TableName: TABLE_NAME };
   let allItems = [];
   let lastEvaluatedKey = null;
 
@@ -75,36 +63,39 @@ async function listUserData() {
         params.ExclusiveStartKey = lastEvaluatedKey;
       }
       const data = await ddbDocClient.send(new ScanCommand(params));
-
       if (data.Items) {
         allItems = allItems.concat(data.Items);
       }
-
       lastEvaluatedKey = data.LastEvaluatedKey;
     } while (lastEvaluatedKey);
 
-    return allItems;
+    const final = [];
+    for (const item of allItems) {
+      if (item.DiscordId && item.hasOwnProperty('messages')) {
+        final.push({ userId: item.DiscordId, userData: item });
+      } else if (item.DiscordId && !item.attribute) {
+        // main user record
+        final.push({ userId: item.DiscordId, userData: item });
+      }
+    }
+    return final;
   } catch (error) {
     console.error("Error listing user data from DynamoDB:", error);
     throw error;
   }
 }
 
-/**
- * @param {string} userId -
- * @returns {Promise<void>}
- */
 async function incrementMessageLeaderWins(userId) {
-  const params = {
-    TableName: TABLE_NAME,
-    Key: { DiscordId: userId },
-    UpdateExpression: "SET messageLeaderWins = if_not_exists(messageLeaderWins, :zero) + :inc",
-    ExpressionAttributeValues: {
-      ":inc": 1,
-      ":zero": 0
-    }
-  };
   try {
+    const params = {
+      TableName: TABLE_NAME,
+      Key: { DiscordId: userId },
+      UpdateExpression: "SET messageLeaderWins = if_not_exists(messageLeaderWins, :zero) + :inc",
+      ExpressionAttributeValues: {
+        ":inc": 1,
+        ":zero": 0
+      }
+    };
     await ddbDocClient.send(new UpdateCommand(params));
   } catch (error) {
     console.error("Error incrementing message leader wins:", error);
@@ -112,31 +103,28 @@ async function incrementMessageLeaderWins(userId) {
   }
 }
 
-/**
- * Updates specific fields of a user's data without overwriting the entire record.
- * @param {string} userId - The Discord user ID.
- * @param {Object} updates - An object containing the fields to update.
- */
 async function updateUserData(userId, updates) {
+  updates.lastUpdated = new Date().toISOString();
+  updates.expireAt = getNextMidnightTimestamp();
+
   const updateExpressions = [];
+  const expressionAttributeNames = {};
   const expressionAttributeValues = {};
 
-  Object.keys(updates).forEach((key) => {
+  for (const key of Object.keys(updates)) {
     updateExpressions.push(`#${key} = :${key}`);
+    expressionAttributeNames[`#${key}`] = key;
     expressionAttributeValues[`:${key}`] = updates[key];
-  });
-
-  const params = {
-    TableName: TABLE_NAME,
-    Key: { DiscordId: userId },
-    UpdateExpression: `SET ${updateExpressions.join(", ")}`,
-    ExpressionAttributeNames: Object.fromEntries(
-        Object.keys(updates).map((key) => [`#${key}`, key])
-    ),
-    ExpressionAttributeValues: expressionAttributeValues,
-  };
+  }
 
   try {
+    const params = {
+      TableName: TABLE_NAME,
+      Key: { DiscordId: userId },
+      UpdateExpression: `SET ${updateExpressions.join(", ")}`,
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: expressionAttributeValues
+    };
     await ddbDocClient.send(new UpdateCommand(params));
   } catch (error) {
     console.error(`Error updating user data for ${userId}:`, error);

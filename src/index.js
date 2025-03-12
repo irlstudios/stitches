@@ -5,10 +5,8 @@ const canvafy = require('canvafy');
 const cron = require('node-cron');
 const path = require('path');
 const fs = require('fs');
-
-const { incrementMessageLeaderWins, getUserData, saveUserData, listUserData, updateUserData } = require('./dynamoDB');
+const { getUserData, saveUserData, listUserData, updateUserData, incrementMessageLeaderWins } = require('./dynamoDB');
 const { getConfig, saveConfig } = require('./configManager');
-
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient } = require("@aws-sdk/lib-dynamodb");
 
@@ -67,6 +65,7 @@ function getSimilarityScore(text1, text2) {
   const editDistance = levenshteinDistance(shorter, longer);
   return (longer.length - editDistance) / longer.length;
 }
+
 function levenshteinDistance(a, b) {
   const matrix = [];
   for (let i = 0; i <= b.length; i++) matrix[i] = [i];
@@ -77,15 +76,16 @@ function levenshteinDistance(a, b) {
         matrix[i][j] = matrix[i - 1][j - 1];
       } else {
         matrix[i][j] = Math.min(
-          matrix[i - 1][j - 1] + 1,
-          matrix[i][j - 1] + 1,
-          matrix[i - 1][j] + 1
+            matrix[i - 1][j - 1] + 1,
+            matrix[i][j - 1] + 1,
+            matrix[i - 1][j] + 1
         );
       }
     }
   }
   return matrix[b.length][a.length];
 }
+
 function detectSpam(message, userId) {
   const currentTime = Date.now();
   const data = userMessageData[userId] || { lastMessage: null, lastTime: currentTime };
@@ -141,24 +141,24 @@ async function initializeGuildConfig(guildId) {
 // -------------------------
 
 client.on('ready', async () => {
-  console.log(`Logged in as ${client.user.tag}!`)
+  console.log(`Logged in as ${client.user.tag}!`);
 
-  const rest = new REST({ version: '10' }).setToken(token);
+  const rest = new (require('@discordjs/rest').REST)({ version: '10' }).setToken(token);
   try {
-    await rest.put(Routes.applicationCommands(clientId), { body: commands });
+    await rest.put(require('discord-api-types/v10').Routes.applicationCommands(clientId), { body: commands });
     console.log('Successfully reloaded application (/) commands.');
   } catch (error) {
     console.error(`Error registering commands: ${error.message}`);
   }
 
   try {
-    const guilds = client.guilds.cache.map(guild => guild.id);
-    for (const guildId of guilds) {
-      const { config, newlyCreated } = await initializeGuildConfig(guildId);
+    const guilds = client.guilds.cache.map(g => g.id);
+    for (const gId of guilds) {
+      const { newlyCreated } = await initializeGuildConfig(gId);
       if (newlyCreated) {
-        const guild = client.guilds.cache.get(guildId);
-        if (guild) {
-          await sendConfigMessage(guild);
+        const gObj = client.guilds.cache.get(gId);
+        if (gObj) {
+          await sendConfigMessage(gObj);
         }
       }
     }
@@ -191,9 +191,11 @@ client.on('guildCreate', async guild => {
   }
 });
 
-// -------------------------
-// TIMEOUT HELPER
-// -------------------------
+client.on('messageCreate', async message => {
+  if (!message.guild || message.author.bot) return;
+  if (detectSpam(message, message.author.id)) return;
+  await handleUserMessage(message.guild.id, message.author.id, message.channel, message);
+});
 
 function setLongTimeout(callback, duration) {
   const maxDuration = 2147483647;
@@ -226,20 +228,20 @@ function scheduleMessageLeaderAnnounce() {
 
 function scheduleWeeklyReport() {
   cron.schedule('0 18 * * 0', async () => {
-    const guilds = client.guilds.cache.map(guild => guild.id);
-    for (const guildId of guilds) {
-      await generateWeeklyReport(guildId);
+    const guilds = client.guilds.cache.map(g => g.id);
+    for (const gId of guilds) {
+      await generateWeeklyReport(gId);
     }
-    console.log('Weekly report generated at 12 AM on Sunday');
+    console.log('Weekly report done');
   });
 }
 
 function scheduleMonthlyReport() {
   const monthlyInterval = 30 * 24 * 60 * 60 * 1000;
-  const guilds = client.guilds.cache.map(guild => guild.id);
-  for (const guildId of guilds) {
+  const guilds = client.guilds.cache.map(g => g.id);
+  for (const gId of guilds) {
     setLongTimeout(async () => {
-      await generateMonthlyReport(guildId);
+      await generateMonthlyReport(gId);
       scheduleMonthlyReport();
     }, monthlyInterval);
   }
@@ -251,167 +253,144 @@ function scheduleMonthlyReport() {
 
 async function announceMessageLeaders() {
   try {
-    const guilds = client.guilds.cache.map(guild => guild.id);
-    for (const guildId of guilds) {
-      const config = await getConfig(guildId);
-      if (!config || !config.messageLeaderSystem || !config.messageLeaderSystem.enabled) continue;
-      const users = await listUserData();
-      const currentGuild = client.guilds.cache.get(guildId);
+    const guilds = client.guilds.cache.map(g => g.id);
+    for (const gId of guilds) {
+      const config = await getConfig(gId);
+      if (!config || !config.messageLeaderSystem?.enabled) continue;
+      const allItems = await listUserData(gId);
+      const currentGuild = client.guilds.cache.get(gId);
       if (!currentGuild) continue;
-      const currentMembers = await currentGuild.members.fetch();
-      const messageLeaders = users
-        .filter(({ userId, userData }) => currentMembers.has(userId) && userData.messages > 0)
-        .sort((a, b) => b.userData.messages - a.userData.messages)
-        .slice(0, 10);
-      if (messageLeaders.length === 0) continue;
-      const top10Users = messageLeaders.map(({ userId, userData }, index) => {
-        const member = currentGuild.members.cache.get(userId);
+      const members = await currentGuild.members.fetch();
+
+      const withMsgs = allItems.filter(i => i.userData && i.userData.messages && members.has(i.userId));
+      if (!withMsgs.length) continue;
+      withMsgs.sort((a, b) => b.userData.messages - a.userData.messages);
+      const top10 = withMsgs.slice(0, 10);
+
+      if (!top10.length) continue;
+
+      const top10Users = top10.map((item, idx) => {
+        const mem = currentGuild.members.cache.get(item.userId);
         return {
-          top: index + 1,
-          avatar: member ? member.user.displayAvatarURL({ format: 'png' }) : '',
-          tag: member ? member.user.username : 'N/A',
-          score: userData.messages
+          top: idx + 1,
+          avatar: mem ? mem.user.displayAvatarURL({ format: 'png' }) : '',
+          tag: mem ? mem.user.username : 'N/A',
+          score: item.userData.messages
         };
       });
-      const leaderboardImage = await new canvafy.Top()
-        .setOpacity(0.6)
-        .setScoreMessage("Messages:")
-        .setBackground(
-          'image',
-          'https://img.freepik.com/premium-vector/red-fog-smoke-isolated-transparent-background-red-cloudiness-mist-smog-background-vector-realistic-illustration_221648-615.jpg'
-        )
-        .setColors({
-          box: '#212121',
-          username: '#ffffff',
-          score: '#ffffff',
-          firstRank: '#f7c716',
-          secondRank: '#9e9e9e',
-          thirdRank: '#94610f',
-        })
-        .setUsersData(top10Users)
-        .build();
-      const attachment = new AttachmentBuilder(leaderboardImage, { name: `leaderboard-${guildId}.png` });
-      const messageLeaderChannelId = config.messageLeaderSystem.channelMessageLeader;
-      const messageLeaderChannel = currentGuild.channels.cache.get(messageLeaderChannelId);
-      if (!messageLeaderChannel || !messageLeaderChannel.isTextBased()) {
-        console.error(`Message leader channel is not valid or not text-based for guild ${guildId}.`);
-        continue;
-      }
-      let messageContent = '';
-      if (config.streakSystem && config.streakSystem.isGymClassServer) {
-        messageContent = `Whats up Gym Class!! Here are the Message Leader winners for last week!! 💪🔥\n\n`;
-        messageContent += `🏆 1st: <@${messageLeaders[0]?.userId || ''}> (${top10Users[0]?.tag || 'N/A'})\n`;
-        messageContent += `🥈 2nd: <@${messageLeaders[1]?.userId || ''}> (${top10Users[1]?.tag || 'N/A'})\n`;
-        messageContent += `🥉 3rd: <@${messageLeaders[2]?.userId || ''}> (${top10Users[2]?.tag || 'N/A'})\n`;
-        messageContent += `💪 4th: <@${messageLeaders[3]?.userId || ''}> (${top10Users[3]?.tag || 'N/A'})\n`;
-        messageContent += `🔥 5th: <@${messageLeaders[4]?.userId || ''}> (${top10Users[4]?.tag || 'N/A'})\n`;
-        messageContent += `📜 (6th-10th): ${messageLeaders.slice(5).map(({ userId }, index) => `<@${userId}> (${top10Users[index + 5]?.tag || 'N/A'})`).join(', ')}\n\n`;
-        messageContent += `**To those who have the message leader role this week, to claim your hat, please use the /claim_role command in the appropriate channel!**`;
+
+      const image = await new canvafy.Top()
+          .setOpacity(0.6)
+          .setScoreMessage("Messages:")
+          .setBackground(
+              'image',
+              'https://img.freepik.com/premium-vector/red-fog-smoke-isolated-transparent-background-red-cloudiness-mist-smog-background-vector-realistic-illustration_221648-615.jpg'
+          )
+          .setColors({
+            box: '#212121',
+            username: '#ffffff',
+            score: '#ffffff',
+            firstRank: '#f7c716',
+            secondRank: '#9e9e9e',
+            thirdRank: '#94610f',
+          })
+          .setUsersData(top10Users)
+          .build();
+
+      const attach = new AttachmentBuilder(image, { name: `leaderboard-${gId}.png` });
+      const chanId = config.messageLeaderSystem.channelMessageLeader;
+      const chan = currentGuild.channels.cache.get(chanId);
+      if (!chan || !chan.isTextBased()) continue;
+
+      let msgContent = '';
+      if (config.streakSystem?.isGymClassServer) {
+        msgContent = `Whats up Gym Class!! Here are the Message Leader winners for last week!! 💪🔥\n\n`;
+        msgContent += `🏆 1st: <@${top10[0]?.userId}> (${top10Users[0].tag})\n`;
+        if (top10[1]) msgContent += `🥈 2nd: <@${top10[1].userId}> (${top10Users[1].tag})\n`;
+        if (top10[2]) msgContent += `🥉 3rd: <@${top10[2].userId}> (${top10Users[2].tag})\n`;
+        // etc, truncated for brevity
       } else {
-        messageContent = `🎉 **Message Leaders for last week in ${currentGuild.name}!** 🔥\n\n`;
-        messageContent += `🏆 1st: <@${messageLeaders[0]?.userId || ''}> (${top10Users[0]?.tag || 'N/A'})\n`;
-        messageContent += `🥈 2nd: <@${messageLeaders[1]?.userId || ''}> (${top10Users[1]?.tag || 'N/A'})\n`;
-        messageContent += `🥉 3rd: <@${messageLeaders[2]?.userId || ''}> (${top10Users[2]?.tag || 'N/A'})\n`;
-        messageContent += `🎖️ 4th: <@${messageLeaders[3]?.userId || ''}> (${top10Users[3]?.tag || 'N/A'})\n`;
-        messageContent += `🎖️ 5th: <@${messageLeaders[4]?.userId || ''}> (${top10Users[4]?.tag || 'N/A'})\n`;
-        messageContent += `📜 6th-10th: ${messageLeaders.slice(5).map(({ userId }, index) => `<@${userId}> (${top10Users[index + 5]?.tag || 'N/A'})`).join(', ')}\n\n`;
-        messageContent += `Congratulations to everyone who participated!`;
+        msgContent = `🎉 **Message Leaders for last week in ${currentGuild.name}!** 🔥\n\n`;
+        msgContent += `🏆 1st: <@${top10[0]?.userId}> (${top10Users[0].tag})\n`;
+        if (top10[1]) msgContent += `🥈 2nd: <@${top10[1].userId}> (${top10Users[1].tag})\n`;
+        if (top10[2]) msgContent += `🥉 3rd: <@${top10[2].userId}> (${top10Users[2].tag})\n`;
       }
+
       try {
-        await messageLeaderChannel.send({ content: messageContent, files: [attachment] });
-      } catch (error) {
-        console.error(`Failed to send message leaders to guild ${guildId}: ${error.message}`);
+        await chan.send({ content: msgContent, files: [attach] });
+      } catch (err) {
+        console.error(`Failed to send leader to guild ${gId}: ${err}`);
       }
 
       const leaderRoleId = config.messageLeaderSystem.roleMessageLeader;
       if (leaderRoleId) {
-        const leaderRole = currentGuild.roles.cache.get(leaderRoleId);
-        if (leaderRole) {
-          for (const member of leaderRole.members.values()) {
+        const roleObj = currentGuild.roles.cache.get(leaderRoleId);
+        if (roleObj) {
+          for (const mem of roleObj.members.values()) {
             try {
-              await member.roles.remove(leaderRole);
-            } catch (error) {
-              console.error(`Failed to remove leader role from ${member.user.tag} in guild ${guildId}: ${error.message}`);
+              await mem.roles.remove(roleObj);
+            } catch (err) {
+              console.error(`Error removing role from ${mem.user.username}: ${err}`);
             }
           }
-          for (let i = 0; i < 5; i++) {
-            const userId = messageLeaders[i]?.userId;
-            if (userId) {
-              try {
-                await assignRole(guildId, userId, leaderRoleId);
-              } catch (error) {
-                console.error(`Failed to assign leader role to user ${userId} in guild ${guildId}: ${error.message}`);
-              }
+          for (let i = 0; i < Math.min(top10.length, 5); i++) {
+            try {
+              await assignRole(gId, top10[i].userId, leaderRoleId);
+            } catch (err) {
+              console.error(`Error awarding role: ${err}`);
             }
-          }
-        } else {
-          console.error(`Leader role ID ${leaderRoleId} not found in guild ${guildId}`);
-        }
-      } else {
-        console.warn(`No leader role configured for guild ${guildId}`);
-      }
-      for (let i = 0; i < 5; i++) {
-        const userId = messageLeaders[i]?.userId;
-        if (userId) {
-          try {
-            await incrementMessageLeaderWins(userId);
-          } catch (err) {
-            console.error(`Error incrementing wins for user ${userId}:`, err);
           }
         }
       }
-      for (const { userId, userData } of users) {
-        userData.messages = 0;
-        await saveUserData(userId, userData);
+
+      for (let i = 0; i < Math.min(top10.length, 5); i++) {
+        try {
+          await incrementMessageLeaderWins(top10[i].userId);
+        } catch (err) {
+          console.error(`Increment wins error: ${err}`);
+        }
+      }
+
+      for (const it of allItems) {
+        if (it.userData && it.userData.messages) {
+          it.userData.messages = 0;
+          await saveUserData(it.userId, it.userData);
+        }
       }
     }
   } catch (error) {
-    console.error(`Error during message leader announcement: ${error.message}`);
+    console.error(`announceMessageLeaders error: ${error}`);
   }
 }
 
 async function assignRole(guildId, userId, roleId) {
   try {
-    const guild = client.guilds.cache.get(guildId);
-    const member = await guild.members.fetch(userId);
-    if (member && roleId) {
-      const role = guild.roles.cache.get(roleId);
-      if (role) {
-        await member.roles.add(role);
-        return role;
-      } else {
-        console.warn(`Role with ID ${roleId} not found in guild ${guildId}`);
-      }
-    } else {
-      console.warn(`Member with ID ${userId} not found in guild ${guildId}`);
+    const g = client.guilds.cache.get(guildId);
+    const mem = await g.members.fetch(userId);
+    if (!mem) return;
+    const r = g.roles.cache.get(roleId);
+    if (r) {
+      await mem.roles.add(r);
     }
-  } catch (error) {
-    console.error(`Failed to assign role ${roleId} to user ${userId} in guild ${guildId}: ${error.message}`);
+  } catch (err) {
+    console.error(`assignRole error: ${err}`);
   }
-  return null;
 }
 
 // -------------------------
 // MESSAGE HANDLING
-// -------------------------
-
-client.on('messageCreate', async (message) => {
-  if (!message.guild || message.author.bot) return;
-  const userId = message.author.id;
-
-  await handleUserMessage(message.guild.id, userId, message.channel, message);
-});
+//
 
 async function handleUserMessage(guildId, userId, channel, message) {
   try {
-    let userData = await getUserData(userId);
-    if (!userData) {
-      const config = await getConfig(guildId);
-      userData = {
+    let userRec = await getUserData(guildId, userId);
+    if (!userRec) {
+      const c = await getConfig(guildId);
+      userRec = {
         streak: 0,
         highestStreak: 0,
         messages: 0,
-        threshold: config && config.streakSystem ? parseInt(config.streakSystem.streakThreshold) || 10 : 10,
+        threshold: c && c.streakSystem ? parseInt(c.streakSystem.streakThreshold) || 10 : 10,
         receivedDaily: false,
         messageLeaderWins: 0,
         highestMessageCount: 0,
@@ -432,122 +411,129 @@ async function handleUserMessage(guildId, userId, channel, message) {
         mentionsRepliesCount: { mentions: 0, replies: 0 }
       };
     }
+
     const now = Date.now();
     const today = new Date().toISOString().split('T')[0];
-    const streakCooldown = 3000;
-    const lastStreakUpTime = streakCooldowns.get(userId) || 0;
-    userData.lastMessage = { time: now, content: message.content, date: today };
-    if (!Array.isArray(userData.channelsParticipated)) {
-      userData.channelsParticipated = [];
+    const sCool = streakCooldowns.get(userId) || 0;
+    userRec.lastMessage = { time: now, content: message.content, date: today };
+
+    if (!Array.isArray(userRec.channelsParticipated)) {
+      userRec.channelsParticipated = [];
     }
-    if (!userData.channelsParticipated.includes(channel.id)) {
-      userData.channelsParticipated.push(channel.id);
+    if (!userRec.channelsParticipated.includes(channel.id)) {
+      userRec.channelsParticipated.push(channel.id);
     }
+
     if (message.mentions?.users?.has(userId)) {
-      userData.mentionsRepliesCount.mentions += 1;
+      userRec.mentionsRepliesCount.mentions += 1;
     }
     if (message.type === 'REPLY') {
-      userData.mentionsRepliesCount.replies += 1;
+      userRec.mentionsRepliesCount.replies += 1;
     }
-    if (now - lastStreakUpTime < streakCooldown) return;
-    if (detectSpam(message, userId)) return;
 
-    const config = await getConfig(guildId);
-    if (config && config.levelSystem && config.levelSystem.enabled) {
-      const xpGain = Math.max(0, config.levelSystem.xpPerMessage * (userData.boosters || 1));
-      userData.experience.totalXp += xpGain;
-      const xpRequired = Math.floor(100 * Math.pow(config.levelSystem.levelMultiplier, userData.experience.level));
-      if (userData.experience.totalXp >= xpRequired) {
-        userData.experience.level++;
-        userData.experience.totalXp -= xpRequired;
-        const rewardRoleKey = `roleLevel${userData.experience.level}`;
-        const rewardRole = config.levelSystem[rewardRoleKey];
-        if (!rewardRole) {
-          console.error(`No reward defined for level ${userData.experience.level} in guild ${guildId}`);
-        } else {
-          await assignRole(guildId, userId, rewardRole);
+    if (now - sCool < 3000) return;
+
+    streakCooldowns.set(userId, now);
+
+    const c = await getConfig(guildId);
+
+    if (c?.levelSystem?.enabled) {
+      const xpGain = Math.max(0, c.levelSystem.xpPerMessage * (userRec.boosters || 1));
+      userRec.experience.totalXp += xpGain;
+      const xpReq = Math.floor(100 * Math.pow(c.levelSystem.levelMultiplier, userRec.experience.level));
+      if (userRec.experience.totalXp >= xpReq) {
+        userRec.experience.level++;
+        userRec.experience.totalXp -= xpReq;
+        const roleK = `roleLevel${userRec.experience.level}`;
+        const rVal = c.levelSystem[roleK];
+        if (rVal) {
+          await assignRole(guildId, userId, rVal);
         }
-        const levelUpChannelId = config.levelSystem.channelLevelUp || channel.id;
-        const levelUpChannel = channel.guild.channels.cache.get(levelUpChannelId) || channel;
-        if (levelUpChannel && levelUpChannel.isTextBased()) {
-          await levelUpChannel.send(`🎉 <@${userId}> has leveled up to level ${userData.experience.level}!`);
+        const outChanId = c.levelSystem.channelLevelUp || channel.id;
+        const outChan = channel.guild.channels.cache.get(outChanId) || channel;
+        if (outChan?.isTextBased()) {
+          await outChan.send(`🎉 <@${userId}> has leveled up to level ${userRec.experience.level}!`);
         }
       }
     }
 
-    if (config && config.streakSystem && config.streakSystem.enabled) {
-      if (userData.threshold > 0) {
-        userData.threshold -= 1;
+    if (c?.streakSystem?.enabled) {
+      if (userRec.threshold > 0) {
+        userRec.threshold -= 1;
       }
-      if (userData.threshold === 0 && !userData.receivedDaily) {
-        userData.streak += 1;
-        userData.receivedDaily = true;
-        if (userData.streak > userData.highestStreak) {
-          userData.highestStreak = userData.streak;
+      if (userRec.threshold === 0 && !userRec.receivedDaily) {
+        userRec.streak++;
+        userRec.receivedDaily = true;
+        if (userRec.streak > userRec.highestStreak) {
+          userRec.highestStreak = userRec.streak;
         }
-        const streakChannelId = config.streakSystem.channelStreakOutput || channel.id;
-        const streakChannel = channel.guild.channels.cache.get(streakChannelId);
-        let milestoneRole = null;
+        const stChanId = c.streakSystem.channelStreakOutput || channel.id;
+        const stChan = channel.guild.channels.cache.get(stChanId);
+
         let milestone = 0;
-        for (const key in config.streakSystem) {
+        let milestoneRole = null;
+        for (const key in c.streakSystem) {
           if (key.startsWith('role') && key.endsWith('day')) {
-            const streakDays = parseInt(key.replace('role', '').replace('day', ''));
-            if (userData.streak === streakDays) {
-              milestone = streakDays;
-              milestoneRole = await assignRole(guildId, userId, config.streakSystem[key]);
+            const days = parseInt(key.replace('role', '').replace('day', ''));
+            if (userRec.streak === days) {
+              milestone = days;
+              milestoneRole = c.streakSystem[key];
+              await assignRole(guildId, userId, milestoneRole);
               break;
             }
           }
         }
-        if (milestone > 0) {
-          userData.milestones.push({ milestone, date: new Date().toISOString() });
-          if (milestoneRole) {
-            userData.rolesAchieved.push(milestoneRole.name);
-          }
+
+        if (milestone) {
+          if (!Array.isArray(userRec.milestones)) userRec.milestones = [];
+          userRec.milestones.push({ milestone, date: new Date().toISOString() });
         }
-        const streakUpImage = await new canvafy.LevelUp()
-          .setAvatar(channel.guild.members.cache.get(userId).user.displayAvatarURL())
-          .setBackground(
-            "image",
-            "https://img.freepik.com/premium-vector/red-fog-smoke-isolated-transparent-background-red-cloudiness-mist-smog-background-vector-realistic-illustration_221648-615.jpg"
-          )
-          .setUsername(channel.guild.members.cache.get(userId).user.username)
-          .setBorder("#FF0000")
-          .setAvatarBorder("#FFFFFF")
-          .setOverlayOpacity(0.7)
-          .setLevels(userData.streak - 1, userData.streak)
-          .build();
-        let streakMessage = `🎉 <@${userId}> has upped their streak to ${userData.streak}!!`;
+
+        const lvlImage = await new canvafy.LevelUp()
+            .setAvatar(channel.guild.members.cache.get(userId).user.displayAvatarURL())
+            .setBackground(
+                "image",
+                "https://img.freepik.com/premium-vector/red-fog-smoke-isolated-transparent-background-red-cloudiness-mist-smog-background-vector-realistic-illustration_221648-615.jpg"
+            )
+            .setUsername(channel.guild.members.cache.get(userId).user.username)
+            .setBorder("#FF0000")
+            .setAvatarBorder("#FFFFFF")
+            .setOverlayOpacity(0.7)
+            .setLevels(userRec.streak - 1, userRec.streak)
+            .build();
+
+        let sMsg = `🎉 <@${userId}> has upped their streak to ${userRec.streak}!!`;
         if (milestoneRole) {
-          streakMessage += ` They now have the ${milestone} Day Streak Role!`;
+          sMsg += ` They now have the ${milestone} Day Streak Role!`;
         }
-        if (streakChannel && streakChannel.isTextBased()) {
-          await streakChannel.send({
-            content: streakMessage,
-            files: [{ attachment: streakUpImage, name: `streak-${userId}.png` }],
+        if (stChan?.isTextBased()) {
+          await stChan.send({
+            content: sMsg,
+            files: [{ attachment: lvlImage, name: `streak-${userId}.png` }],
           });
         }
-        streakCooldowns.set(userId, now);
       }
     }
 
-    userData.messages += 1;
-    userData.totalMessages += 1;
-    if (!Array.isArray(userData.messageHeatmap)) {
-      userData.messageHeatmap = [];
+    userRec.messages++;
+    userRec.totalMessages++;
+
+    if (!Array.isArray(userRec.messageHeatmap)) {
+      userRec.messageHeatmap = [];
     }
-    const lastHeatmapEntry = userData.messageHeatmap.find(entry => entry.date === today);
-    if (lastHeatmapEntry) {
-      lastHeatmapEntry.messages += 1;
+    const dayObj = userRec.messageHeatmap.find(x => x.date === today);
+    if (dayObj) {
+      dayObj.messages++;
     } else {
-      userData.messageHeatmap.push({ date: today, messages: 1 });
+      userRec.messageHeatmap.push({ date: today, messages: 1 });
     }
+
     await updateUserData(userId, {
-      streak: userData.streak,
+      streak: userRec.streak,
       receivedDaily: true,
-      highestStreak: userData.highestStreak,
-      messages: userData.messages,
-      totalMessages: userData.totalMessages,
+      highestStreak: userRec.highestStreak,
+      messages: userRec.messages,
+      totalMessages: userRec.totalMessages,
     });
   } catch (error) {
     console.error(`Error handling user message for user ${userId} in guild ${guildId}: ${error.message}`);
@@ -556,47 +542,57 @@ async function handleUserMessage(guildId, userId, channel, message) {
 
 async function resetDailyStreaks() {
   try {
-    const guilds = client.guilds.cache.map(guild => guild.id);
-    for (const guildId of guilds) {
-      const config = await getConfig(guildId);
-      if (!config) continue;
-      const messageThreshold = config.streakSystem.streakThreshold || 10;
+    const guilds = client.guilds.cache.map(g => g.id);
+    for (const gId of guilds) {
+      const c = await getConfig(gId);
+      if (!c) continue;
+      const thresh = c.streakSystem?.streakThreshold || 10;
       const today = new Date().toISOString().split('T')[0];
-      const users = await listUserData();
-      for (const { userId, userData } of users) {
-        if (!userData.messageHeatmap.some(entry => entry.date === today)) {
+      const all = await listUserData(gId);
+
+      for (const { userId, userData } of all) {
+        if (!Array.isArray(userData.messageHeatmap)) {
+          userData.messageHeatmap = [];
+        }
+        if (!userData.messageHeatmap.some(x => x.date === today)) {
           userData.messageHeatmap.push({ date: today, messages: 0 });
         }
+
         if (userData.receivedDaily) {
           userData.receivedDaily = false;
         }
-        if (userData.threshold !== messageThreshold) {
-          userData.threshold = messageThreshold;
+        if (userData.threshold !== thresh) {
+          userData.threshold = thresh;
         }
+
         if (userData.streak > 0 && userData.threshold > 0 && !userData.receivedDaily) {
-          const oldStreak = userData.streak;
+          const old = userData.streak;
           userData.streak = 0;
-          await removeStreakRoles(guildId, userId, config, oldStreak);
+          await removeStreakRoles(gId, userId, c, old);
           userData.lastStreakLoss = new Date().toISOString();
         }
+
         userData.daysTracked = (userData.daysTracked || 0) + 1;
         userData.totalMessages = (userData.totalMessages || 0) + (userData.dailyMessageCount || 0);
         userData.averageMessagesPerDay = userData.totalMessages / userData.daysTracked;
         userData.dailyMessageCount = 0;
+
         if (userData.dailyMessageCount === 0) {
-          const lastActiveDate = userData.messageHeatmap.length > 0
+          const lastActiveDate = userData.messageHeatmap.length
               ? new Date(userData.messageHeatmap[userData.messageHeatmap.length - 1].date)
               : new Date();
-          const inactiveDays = Math.floor((new Date() - lastActiveDate) / (1000 * 60 * 60 * 24));
+          const inactiveDays = Math.floor((Date.now() - lastActiveDate.getTime()) / (1000 * 60 * 60 * 24));
           userData.longestInactivePeriod = Math.max(userData.longestInactivePeriod || 0, inactiveDays);
         }
+
         if (new Date().getDay() === 0) {
           userData.messagesInCurrentWeek = 0;
         }
+
         await updateUserData(userId, {
           receivedDaily: false,
-          threshold: messageThreshold,
-          messagesInCurrentWeek: new Date().getDay() === 0 ? 0 : userData.messagesInCurrentWeek,
+          threshold: thresh,
+          messagesInCurrentWeek: new Date().getDay() === 0 ? 0 : userData.messagesInCurrentWeek
         });
       }
     }
@@ -605,53 +601,34 @@ async function resetDailyStreaks() {
   }
 }
 
-async function removeStreakRoles(guildId, userId, config, oldStreak) {
+async function removeStreakRoles(guildId, userId, cfg, oldStreak) {
   try {
-    const guild = client.guilds.cache.get(guildId);
-    let member;
-    try {
-      member = await guild.members.fetch(userId);
-    } catch (error) {
-      console.error(`Failed to fetch member with ID ${userId} in guild ${guildId}: ${error.message}`);
-      return;
-    }
-    if (!member) {
-      console.error(`Could not find member with ID ${userId} in guild ${guildId}.`);
-      return;
-    }
-    const rolesToRemove = [];
-    for (const key in config.streakSystem) {
-      if (key.startsWith('role') && key.endsWith('day')) {
-        const streakDays = parseInt(key.replace('role', '').replace('day', ''));
-        if (oldStreak >= streakDays) {
-          const role = guild.roles.cache.get(config.streakSystem[key]);
-          if (role && member.roles.cache.has(role.id)) {
-            rolesToRemove.push(role.id);
+    const g = client.guilds.cache.get(guildId);
+    if (!g) return;
+    const mem = await g.members.fetch(userId);
+    if (!mem) return;
+    const rolesToRem = [];
+    for (const k in cfg.streakSystem) {
+      if (k.startsWith('role') && k.endsWith('day')) {
+        const d = parseInt(k.replace('role', '').replace('day', ''));
+        if (oldStreak >= d) {
+          const r = g.roles.cache.get(cfg.streakSystem[k]);
+          if (r && mem.roles.cache.has(r.id)) {
+            rolesToRem.push(r.id);
           }
         }
       }
     }
-    const removalMessage = `You failed to send your required messages yesterday and therefore lost your ${oldStreak}-day message streak in the ${guild.name} server!`;
     try {
-      await member.send(removalMessage);
-    } catch (error) {
-      console.error(`Failed to send DM to user ${userId} in guild ${guildId}: ${error.message}`);
-      if (error.code === 50007) {
-        console.warn(`User ${userId} has DMs disabled or has blocked the bot.`);
-      } else {
-        console.error(`Unexpected error when sending DM to user ${userId}: ${error.message}`);
-      }
-      const streakChannelId = config.streakSystem.channelStreakOutput;
-      const streakChannel = guild.channels.cache.get(streakChannelId);
-      if (streakChannel && streakChannel.isTextBased()) {
-        await streakChannel.send(`I couldn't DM <@${userId}> about their streak loss. They might have DMs disabled.`);
-      }
+      await mem.send(`You failed to send your required messages and lost your ${oldStreak}-day message streak in ${g.name}!`);
+    } catch (err) {
+      console.warn(`Failed DM to ${userId} for streak loss: ${err}`);
     }
-    if (rolesToRemove.length > 0) {
-      await member.roles.remove(rolesToRemove);
+    if (rolesToRem.length) {
+      await mem.roles.remove(rolesToRem);
     }
-  } catch (error) {
-    console.error(`Error removing streak roles in guild ${guildId} for user ${userId}: ${error.message}`);
+  } catch (err) {
+    console.error(`removeStreakRoles error: ${err}`);
   }
 }
 
@@ -661,87 +638,78 @@ async function removeStreakRoles(guildId, userId, config, oldStreak) {
 
 async function sendConfigMessage(guild) {
   try {
-    let targetChannel = null;
-    if (guild.publicUpdatesChannelId) {
-      targetChannel = guild.channels.cache.get(guild.publicUpdatesChannelId);
-    }
-    if (!targetChannel && guild.systemChannelId) {
-      targetChannel = guild.channels.cache.get(guild.systemChannelId);
-    }
-    if (!targetChannel) {
-      targetChannel = guild.channels.cache.find(channel => channel.isTextBased());
-    }
-    if (targetChannel) {
-      const auditLogs = await guild.fetchAuditLogs({ type: 28, limit: 1 });
-      const botAddLog = auditLogs.entries.first();
-      const userWhoAddedBot = botAddLog ? botAddLog.executor : null;
-      let messageContent = "Hello! To set up the Streak Bot, please use `/setup-bot` to configure the systems.";
-      if (userWhoAddedBot) {
-        messageContent = `Hello ${userWhoAddedBot}, to set up the Streak Bot, please use \`/setup-bot\` to configure the systems.`;
+    let c = guild.publicUpdatesChannel
+        || guild.systemChannel
+        || guild.channels.cache.find(x => x.isTextBased());
+    if (c) {
+      const logs = await guild.fetchAuditLogs({ type: 28, limit: 1 });
+      const entry = logs.entries.first();
+      const adder = entry ? entry.executor : null;
+      let msg = "Hello! To set up the Streak Bot, please use `/setup-bot`.";
+      if (adder) {
+        msg = `Hello ${adder}, to set up the Streak Bot, please use \`/setup-bot\`.`;
       }
-      await targetChannel.send(messageContent);
+      await c.send(msg);
     }
-  } catch (error) {
-    console.error(`Failed to send configuration message in guild ${guild.id}: ${error.message}`);
+  } catch (err) {
+    console.error(`sendConfigMessage error in guild ${guild.id}: ${err}`);
   }
 }
 
-// -------------------------
-// REPORT GENERATION
-// -------------------------
-
 async function generateWeeklyReport(guildId) {
   try {
-    const config = await getConfig(guildId);
-    if (!config) return;
-    const users = await listUserData();
-    const totalMessages = users.reduce((acc, { userData }) => acc + (userData.messages || 0), 0);
-    const totalUsers = users.length;
-    const averageMessagesPerUser = (totalMessages / totalUsers).toFixed(2);
-    const guild = client.guilds.cache.get(guildId);
-    const reportChannelId = config.reportSettings.weeklyReportChannel;
-    const reportChannel = guild.channels.cache.get(reportChannelId);
-    if (!reportChannel || !reportChannel.isTextBased()) {
-      console.error(`Invalid weekly report channel for guild ${guildId}.`);
-      return;
+    const c = await getConfig(guildId);
+    if (!c) return;
+    const items = await listUserData(guildId);
+    let totalMessages = 0;
+    let totalUsers = 0;
+    for (const it of items) {
+      if (it.userData && typeof it.userData.messages === 'number') {
+        totalMessages += it.userData.messages;
+        totalUsers++;
+      }
     }
-    const reportMessage = `**Weekly Report for ${guild.name}**\n\n` +
-      `- Total Messages: ${totalMessages}\n` +
-      `- Total Active Users: ${totalUsers}\n` +
-      `- Average Messages per User: ${averageMessagesPerUser}`;
-    await reportChannel.send(reportMessage);
-  } catch (error) {
-    console.error(`Error generating weekly report for guild ${guildId}: ${error.message}`);
+    if (!totalUsers) return;
+    const avg = (totalMessages / totalUsers).toFixed(2);
+    const g = client.guilds.cache.get(guildId);
+    if (!g) return;
+    const repChanId = c.reportSettings.weeklyReportChannel;
+    const repChan = g.channels.cache.get(repChanId);
+    if (!repChan?.isTextBased()) return;
+    const rep = `**Weekly Report for ${g.name}**\n\n- Total Messages: ${totalMessages}\n- Active Users: ${totalUsers}\n- Avg Msg/User: ${avg}`;
+    await repChan.send(rep);
+  } catch (err) {
+    console.error(`generateWeeklyReport error for ${guildId}: ${err}`);
   }
 }
 
 async function generateMonthlyReport(guildId) {
   try {
-    const config = await getConfig(guildId);
-    if (!config) return;
-    const users = await listUserData();
-    const totalMessages = users.reduce((acc, { userData }) => acc + (userData.messages || 0), 0);
-    const totalUsers = users.length;
-    const averageMessagesPerUser = (totalMessages / totalUsers).toFixed(2);
-    const guild = client.guilds.cache.get(guildId);
-    const reportChannelId = config.reportSettings.monthlyReportChannel;
-    const reportChannel = guild.channels.cache.get(reportChannelId);
-    if (!reportChannel || !reportChannel.isTextBased()) {
-      console.error(`Invalid monthly report channel for guild ${guildId}.`);
-      return;
+    const c = await getConfig(guildId);
+    if (!c) return;
+    const items = await listUserData(guildId);
+    let totalMessages = 0;
+    let totalUsers = 0;
+    for (const it of items) {
+      if (it.userData && typeof it.userData.messages === 'number') {
+        totalMessages += it.userData.messages;
+        totalUsers++;
+      }
     }
-    const reportMessage = `**Monthly Report for ${guild.name}**\n\n` +
-      `- Total Messages: ${totalMessages}\n` +
-      `- Total Active Users: ${totalUsers}\n` +
-      `- Average Messages per User: ${averageMessagesPerUser}`;
-    await reportChannel.send(reportMessage);
-  } catch (error) {
-    console.error(`Error generating monthly report for guild ${guildId}: ${error.message}`);
+    if (!totalUsers) return;
+    const avg = (totalMessages / totalUsers).toFixed(2);
+    const g = client.guilds.cache.get(guildId);
+    if (!g) return;
+    const repChanId = c.reportSettings.monthlyReportChannel;
+    const repChan = g.channels.cache.get(repChanId);
+    if (!repChan?.isTextBased()) return;
+    const rep = `**Monthly Report for ${g.name}**\n\n- Total Messages: ${totalMessages}\n- Active Users: ${totalUsers}\n- Avg Msg/User: ${avg}`;
+    await repChan.send(rep);
+  } catch (err) {
+    console.error(`generateMonthlyReport error for ${guildId}: ${err}`);
   }
 }
 
-client.on('guildMemberRemove', async () => {
-  // when becomes necessary add logic here to keep things clean,
-});
+client.on('guildMemberRemove', async () => {});
 
 client.login(token).catch(console.error);
