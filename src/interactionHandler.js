@@ -39,7 +39,6 @@ module.exports = async (client, interaction) => {
         console.error(`Error executing command ${interaction.commandName}:`, error);
         handleInteractionError(interaction, 'There was an error while executing this command!');
       }
-
     } else if (interaction.isStringSelectMenu()) {
       const { guild, customId } = interaction;
       if (!guild) {
@@ -59,7 +58,7 @@ module.exports = async (client, interaction) => {
           });
         }
       } catch (error) {
-        console.error("Error loading configuration from DynamoDB:", error);
+        console.error("Error loading configuration:", error);
         return interaction.reply({
           content: 'An error occurred while loading the configuration.',
           ephemeral: true,
@@ -81,7 +80,7 @@ module.exports = async (client, interaction) => {
           await handleReportOptions(interaction, config, guild);
         }
       } catch (error) {
-        console.error(`Error handling select menu interaction: ${customId}`, error);
+        console.error(`Error handling select menu interaction (${customId}):`, error);
         handleInteractionError(interaction, 'There was an error processing your selection.');
       }
     }
@@ -113,6 +112,7 @@ async function handleInteractionError(interaction, errorMessage) {
   }
 }
 
+// Updated to include new attributes for expiration and lastUpdated in config objects
 function ensureConfigStructure(config) {
   if (!config.streakSystem) {
     config.streakSystem = {
@@ -138,6 +138,13 @@ function ensureConfigStructure(config) {
       weeklyReportChannel: "",
       monthlyReportChannel: ""
     };
+  }
+  // Optional: Set default metadata if not present
+  if (!config.lastUpdated) {
+    config.lastUpdated = new Date().toISOString();
+  }
+  if (!config.expireAt) {
+    config.expireAt = null;
   }
 }
 
@@ -402,13 +409,11 @@ async function addMilestone(interaction, guild, config, guildId, systemType) {
           reason: `Role for users with a ${milestone}-day streak or reaching Level ${milestone}`,
         });
       }
-
       if (systemType === 'streak') {
         config.streakSystem[`role${milestone}day`] = milestoneRole.id;
       } else {
         config.levelSystem[`roleLevel${milestone}`] = milestoneRole.id;
       }
-
       await saveConfig(guildId, config);
       await interaction.followUp({
         content: `Milestone for ${milestone} ${systemType === 'streak' ? 'days' : 'level'} has been added.`,
@@ -443,22 +448,18 @@ async function removeMilestone(interaction, guild, config, guildId, systemType) 
       const milestoneRoleId = systemType === 'streak'
           ? config.streakSystem[roleKey]
           : config.levelSystem[roleKey];
-
       if (!milestoneRoleId) {
         return interaction.followUp({ content: `No milestone for ${milestone} ${systemType === 'streak' ? 'days' : 'level'} found.`, ephemeral: true });
       }
-
       const milestoneRole = guild.roles.cache.get(milestoneRoleId);
       if (milestoneRole) {
         await milestoneRole.delete();
       }
-
       if (systemType === 'streak') {
         delete config.streakSystem[roleKey];
       } else {
         delete config.levelSystem[roleKey];
       }
-
       await saveConfig(guildId, config);
       await interaction.followUp({
         content: `Milestone for ${milestone} ${systemType === 'streak' ? 'days' : 'level'} has been removed.`,

@@ -27,23 +27,19 @@ module.exports = {
           option.setName('value')
               .setDescription('New value for the field')
               .setRequired(true)),
-
   async execute(interaction) {
     if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
       return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
     }
-
     const targetUser = interaction.options.getUser('target');
     const field = interaction.options.getString('field');
     const value = interaction.options.getString('value');
     const guildId = interaction.guild.id;
     const client = interaction.client;
-
     const config = await getConfig(guildId);
     if (!config) {
       return interaction.reply({ content: 'Configuration not found for this guild.', ephemeral: true });
     }
-
     let userData = await getUserData(guildId, targetUser.id) || {
       messages: 0,
       streak: 0,
@@ -53,11 +49,11 @@ module.exports = {
       experience: { totalXp: 0, level: 0 },
       activeDaysCount: 0,
       longestInactivePeriod: 0,
-      messageHeatmap: []
+      messageHeatmap: [],
+      expireAt: null,
+      lastUpdated: new Date().toISOString()
     };
-
     const updateFields = {};
-
     if (['messages', 'streak', 'level', 'activeDaysCount', 'longestInactivePeriod'].includes(field)) {
       if (isNaN(value) || parseInt(value, 10) < 0) {
         return interaction.reply({ content: 'Please enter a valid number for this field.', ephemeral: true });
@@ -81,45 +77,38 @@ module.exports = {
     } else {
       return interaction.reply({ content: 'Invalid field specified.', ephemeral: true });
     }
-
     if (field === 'streak') {
       const newStreak = parseInt(value, 10);
       if (newStreak > userData.highestStreak) {
         updateFields.highestStreak = newStreak;
       }
-
       for (let i = 1; i <= userData.streak; i++) {
         const roleKey = `role${i}day`;
         const roleId = config.streakSystem?.[roleKey];
         if (roleId) await removeRole(client, guildId, targetUser.id, roleId);
       }
-
       for (let i = 1; i <= newStreak; i++) {
         const roleKey = `role${i}day`;
         const roleId = config.streakSystem?.[roleKey];
         if (roleId) await assignRole(client, guildId, targetUser.id, roleId);
       }
     }
-
     if (field === 'level') {
       const newLevel = parseInt(value, 10);
       const oldLevel = userData.experience.level;
       const xpRequired = Math.floor(100 * Math.pow(config.levelSystem.levelMultiplier, newLevel));
       updateFields['experience.totalXp'] = Math.min(userData.experience.totalXp, xpRequired - 1);
-
       for (let i = 1; i <= oldLevel; i++) {
         const roleKey = `roleLevel${i}`;
         const roleId = config.levelSystem?.[roleKey];
         if (roleId) await removeRole(client, guildId, targetUser.id, roleId);
       }
-
       for (let i = 1; i <= newLevel; i++) {
         const roleKey = `roleLevel${i}`;
         const roleId = config.levelSystem?.[roleKey];
         if (roleId) await assignRole(client, guildId, targetUser.id, roleId);
       }
     }
-
     await updateUserData(targetUser.id, updateFields);
     await interaction.reply({ content: `Successfully updated ${field} for ${targetUser.username}.`, ephemeral: true });
   }

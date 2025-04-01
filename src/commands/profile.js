@@ -14,26 +14,18 @@ module.exports = {
     const targetUser = interaction.options.getUser('target') || interaction.user;
     const guildId = interaction.guild.id;
     const userId = targetUser.id;
-
     let config, userData;
     try {
       config = await getConfig(guildId);
-      if (!config) {
-        return interaction.reply({ content: 'An error occurred: configuration not found.', ephemeral: true });
-      }
-      userData = await getUserData(userId);
+      if (!config) return interaction.reply({ content: 'An error occurred: configuration not found.', ephemeral: true });
+      userData = await getUserData(guildId, targetUser.id);
     } catch (error) {
       console.error(`Failed to load config or user data: ${error}`);
       return interaction.reply({ content: 'An error occurred while loading the profile data.', ephemeral: true });
     }
-
-    if (!userData) {
-      return interaction.reply({ content: `${targetUser.username} has no profile data.`, ephemeral: true });
-    }
-
+    if (!userData) return interaction.reply({ content: `${targetUser.username} has no profile data.`, ephemeral: true });
     const pages = generateProfilePages(targetUser, userData, interaction.guild, config);
     let currentPage = 0;
-
     try {
       await interaction.deferReply({ ephemeral: true });
       const profileEmbed = await interaction.editReply({
@@ -41,24 +33,18 @@ module.exports = {
         components: [getPaginationRow(currentPage, pages.length)],
         fetchReply: true
       });
-
       const collector = profileEmbed.createMessageComponentCollector({
-        filter: (btnInteraction) => btnInteraction.user.id === interaction.user.id,
+        filter: btnInteraction => btnInteraction.user.id === interaction.user.id,
         time: 60000
       });
-
-      collector.on('collect', async (btnInteraction) => {
-        if (btnInteraction.customId === 'next') {
-          currentPage = Math.min(currentPage + 1, pages.length - 1);
-        } else if (btnInteraction.customId === 'prev') {
-          currentPage = Math.max(currentPage - 1, 0);
-        }
+      collector.on('collect', async btnInteraction => {
+        if (btnInteraction.customId === 'next') currentPage = Math.min(currentPage + 1, pages.length - 1);
+        else if (btnInteraction.customId === 'prev') currentPage = Math.max(currentPage - 1, 0);
         await btnInteraction.update({
           embeds: [pages[currentPage]],
           components: [getPaginationRow(currentPage, pages.length)]
         });
       });
-
       collector.on('end', async () => {
         await interaction.editReply({ components: [] });
       });
@@ -75,21 +61,17 @@ function generateProfilePages(user, userData, guild, config) {
       .setTitle(`${user.username}'s Profile`)
       .setThumbnail(user.displayAvatarURL({ dynamic: true }))
       .setColor('#2ECC71');
-
   const streakRole = getStreakRole(userData.streak, userData.highestStreak, guild, config);
   const progressToNextMilestone = calculateProgressToNextMilestone(userData.streak, config);
   const consistencyRating = calculateConsistencyRating(userData);
   const levelProgress = calculateLevelProgress(userData);
-
   const uniqueMilestones = Array.isArray(userData.milestones)
       ? Array.from(new Set(userData.milestones.map(m => `${m.milestone}-day streak on ${new Date(m.date).toLocaleDateString()}`)))
       : [];
   const uniqueRoles = Array.isArray(userData.rolesAchieved)
       ? Array.from(new Set(userData.rolesAchieved))
       : [];
-
   const sections = [];
-
   if (config.streakSystem?.enabled) {
     sections.push({
       title: 'Streak Information',
@@ -99,53 +81,55 @@ function generateProfilePages(user, userData, guild, config) {
         { name: 'Streak Role', value: streakRole.current || 'None', inline: true },
         { name: 'Next Milestone', value: progressToNextMilestone, inline: true },
         { name: 'Active Days', value: `${userData.activeDaysCount || 0}`, inline: true },
-        { name: 'Longest Inactive Period', value: `${userData.longestInactivePeriod || 0} days`, inline: true },
-        { name: 'Consistency Rating', value: consistencyRating, inline: true },
-      ],
+        { name: 'Longest Inactive', value: `${userData.longestInactivePeriod || 0} days`, inline: true },
+        { name: 'Consistency', value: consistencyRating, inline: true }
+      ]
     });
   }
-
   if ((Array.isArray(userData.milestones) && userData.milestones.length) || (Array.isArray(userData.rolesAchieved) && userData.rolesAchieved.length)) {
     sections.push({
       title: 'Achievements',
       fields: [
-        { name: 'Milestones Achieved', value: uniqueMilestones.join('\n') || 'None', inline: true },
+        { name: 'Milestones', value: uniqueMilestones.join('\n') || 'None', inline: true },
         { name: 'Roles Achieved', value: uniqueRoles.join('\n') || 'None', inline: true },
-        { name: 'Last Streak Loss', value: userData.lastStreakLoss ? new Date(userData.lastStreakLoss).toLocaleDateString() : 'Never', inline: true },
-      ],
+        { name: 'Last Streak Loss', value: userData.lastStreakLoss ? new Date(userData.lastStreakLoss).toLocaleDateString() : 'Never', inline: true }
+      ]
     });
   }
-
   if (config.messageLeaderSystem?.enabled) {
     sections.push({
       title: 'Message Leader Wins',
       fields: [
-        { name: 'Message Leader Wins', value: `${userData.messageLeaderWins}`, inline: true },
-        { name: 'Most Consecutive Wins', value: `${userData.mostConsecutiveLeader}`, inline: true },
-      ],
+        { name: 'Wins', value: `${userData.messageLeaderWins}`, inline: true },
+        { name: 'Consecutive Wins', value: `${userData.mostConsecutiveLeader}`, inline: true }
+      ]
     });
   }
-
   if (config.levelSystem?.enabled) {
     sections.push({
       title: 'Level and XP',
       fields: [
         { name: 'Current Level', value: `${userData.experience.level || 0}`, inline: true },
         { name: 'Current XP', value: `${userData.experience.totalXp || 0}`, inline: true },
-        { name: 'XP to Next Level', value: levelProgress, inline: true },
-      ],
+        { name: 'XP to Next', value: levelProgress, inline: true }
+      ]
     });
   }
-
   sections.push({
     title: 'Message Activity',
     fields: [
       { name: 'Total Messages', value: `${userData.totalMessages}`, inline: true },
-      { name: 'Average Messages/Day', value: `${(userData.averageMessagesPerDay || 0).toFixed(2)}`, inline: true },
-      { name: 'Messages in Current Week', value: `${Array.isArray(userData.messageHeatmap) ? userData.messageHeatmap.length : 0}`, inline: true },
-    ],
+      { name: 'Avg Messages/Day', value: `${(userData.averageMessagesPerDay || 0).toFixed(2)}`, inline: true },
+      { name: 'Messages This Week', value: `${Array.isArray(userData.messageHeatmap) ? userData.messageHeatmap.length : 0}`, inline: true }
+    ]
   });
-
+  sections.push({
+    title: 'Data Timestamps',
+    fields: [
+      { name: 'Last Updated', value: userData.lastUpdated ? new Date(userData.lastUpdated).toLocaleString() : 'Unknown', inline: true },
+      { name: 'Expires At', value: userData.expireAt ? new Date(userData.expireAt * 1000).toLocaleString() : 'Unknown', inline: true }
+    ]
+  });
   sections.forEach(section => {
     const embed = new EmbedBuilder(baseEmbed);
     embed.setDescription(`**${section.title}**`);
@@ -177,16 +161,11 @@ function getStreakRole(currentStreak, highestStreak, guild, config) {
     4: config.streakSystem.role4day,
     5: config.streakSystem.role5day,
   };
-
   let currentRole = null;
   let highestRole = null;
   for (const [threshold, roleId] of Object.entries(streakRoles)) {
-    if (currentStreak >= threshold) {
-      currentRole = guild.roles.cache.get(roleId)?.name;
-    }
-    if (highestStreak >= threshold) {
-      highestRole = guild.roles.cache.get(roleId)?.name;
-    }
+    if (currentStreak >= threshold) currentRole = guild.roles.cache.get(roleId)?.name;
+    if (highestStreak >= threshold) highestRole = guild.roles.cache.get(roleId)?.name;
   }
   return { current: currentRole || 'None', highest: highestRole || 'None' };
 }
@@ -215,7 +194,7 @@ function calculateConsistencyRating(userData) {
 function calculateLevelProgress(userData) {
   const level = userData.experience?.level || 0;
   const xp = userData.experience?.totalXp || 0;
-  const xpRequiredForNextLevel = Math.floor(5 * Math.pow(level, 2) + 50 * level + 100);
-  const remainingXP = xpRequiredForNextLevel - xp;
-  return `${remainingXP} XP to reach level ${level + 1}`;
+  const xpRequiredForNext = Math.floor(5 * Math.pow(level, 2) + 50 * level + 100);
+  const remaining = xpRequiredForNext - xp;
+  return `${remaining} XP to reach level ${level + 1}`;
 }

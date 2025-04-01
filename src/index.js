@@ -6,7 +6,7 @@ const cron = require('node-cron');
 const path = require('path');
 const fs = require('fs');
 const { getUserData, saveUserData, listUserData, updateUserData, incrementMessageLeaderWins } = require('./dynamoDB');
-const { getConfig, saveConfig } = require('./configManager');
+const { getConfig, saveConfig, ensureConfigStructure } = require('./configManager');
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient } = require("@aws-sdk/lib-dynamodb");
 
@@ -58,8 +58,6 @@ const userMessageData = {};
 // -------------------------
 // UTILITY FUNCTIONS
 // -------------------------
-
-// #TODO: figure out how to do this better, as of right now its not very accurate.
 function getSimilarityScore(text1, text2) {
   const [shorter, longer] = text1.length < text2.length ? [text1, text2] : [text2, text1];
   const editDistance = levenshteinDistance(shorter, longer);
@@ -102,7 +100,6 @@ function detectSpam(message, userId) {
 // -------------------------
 // GUILD CONFIG INITIALIZATION
 // -------------------------
-
 async function initializeGuildConfig(guildId) {
   let config = await getConfig(guildId);
   if (!config) {
@@ -139,10 +136,10 @@ async function initializeGuildConfig(guildId) {
 // -------------------------
 // CLIENT EVENTS
 // -------------------------
-
 client.on('ready', async () => {
   console.log(`Logged in as ${client.user.tag}!`);
 
+  // Register slash commands
   const rest = new (require('@discordjs/rest').REST)({ version: '10' }).setToken(token);
   try {
     await rest.put(require('discord-api-types/v10').Routes.applicationCommands(clientId), { body: commands });
@@ -151,6 +148,7 @@ client.on('ready', async () => {
     console.error(`Error registering commands: ${error.message}`);
   }
 
+  // Initialize guild configs and send configuration message if new
   try {
     const guilds = client.guilds.cache.map(g => g.id);
     for (const gId of guilds) {
@@ -166,6 +164,7 @@ client.on('ready', async () => {
     console.error(`Error during guild initialization: ${error.message}`);
   }
 
+  // Scheduled tasks
   scheduleDailyReset();
   setTimeout(scheduleMessageLeaderAnnounce, 2000);
   scheduleWeeklyReport();
@@ -211,7 +210,6 @@ function setLongTimeout(callback, duration) {
 // -------------------------
 // SCHEDULED TASKS
 // -------------------------
-
 function scheduleDailyReset() {
   cron.schedule('0 0 * * *', () => {
     console.log('Running daily streak reset at 12 AM');
@@ -250,7 +248,6 @@ function scheduleMonthlyReport() {
 // -------------------------
 // ANNOUNCEMENT AND REPORT FUNCTIONS
 // -------------------------
-
 async function announceMessageLeaders() {
   try {
     const guilds = client.guilds.cache.map(g => g.id);
@@ -261,14 +258,11 @@ async function announceMessageLeaders() {
       const currentGuild = client.guilds.cache.get(gId);
       if (!currentGuild) continue;
       const members = await currentGuild.members.fetch();
-
       const withMsgs = allItems.filter(i => i.userData && i.userData.messages && members.has(i.userId));
       if (!withMsgs.length) continue;
       withMsgs.sort((a, b) => b.userData.messages - a.userData.messages);
       const top10 = withMsgs.slice(0, 10);
-
       if (!top10.length) continue;
-
       const top10Users = top10.map((item, idx) => {
         const mem = currentGuild.members.cache.get(item.userId);
         return {
@@ -278,7 +272,6 @@ async function announceMessageLeaders() {
           score: item.userData.messages
         };
       });
-
       const image = await new canvafy.Top()
           .setOpacity(0.6)
           .setScoreMessage("Messages:")
@@ -296,32 +289,27 @@ async function announceMessageLeaders() {
           })
           .setUsersData(top10Users)
           .build();
-
       const attach = new AttachmentBuilder(image, { name: `leaderboard-${gId}.png` });
       const chanId = config.messageLeaderSystem.channelMessageLeader;
       const chan = currentGuild.channels.cache.get(chanId);
       if (!chan || !chan.isTextBased()) continue;
-
       let msgContent = '';
       if (config.streakSystem?.isGymClassServer) {
         msgContent = `Whats up Gym Class!! Here are the Message Leader winners for last week!! 💪🔥\n\n`;
         msgContent += `🏆 1st: <@${top10[0]?.userId}> (${top10Users[0].tag})\n`;
-        if (top10[1]) msgContent += `🥈 2nd: <@${top10[1].userId}> (${top10Users[1].tag})\n`;
-        if (top10[2]) msgContent += `🥉 3rd: <@${top10[2].userId}> (${top10Users[2].tag})\n`;
-        // etc, truncated for brevity
+        if (top10[1]) msgContent += `🥈 2nd: <@${top10[1]?.userId}> (${top10Users[1].tag})\n`;
+        if (top10[2]) msgContent += `🥉 3rd: <@${top10[2]?.userId}> (${top10Users[2].tag})\n`;
       } else {
         msgContent = `🎉 **Message Leaders for last week in ${currentGuild.name}!** 🔥\n\n`;
         msgContent += `🏆 1st: <@${top10[0]?.userId}> (${top10Users[0].tag})\n`;
-        if (top10[1]) msgContent += `🥈 2nd: <@${top10[1].userId}> (${top10Users[1].tag})\n`;
-        if (top10[2]) msgContent += `🥉 3rd: <@${top10[2].userId}> (${top10Users[2].tag})\n`;
+        if (top10[1]) msgContent += `🥈 2nd: <@${top10[1]?.userId}> (${top10Users[1].tag})\n`;
+        if (top10[2]) msgContent += `🥉 3rd: <@${top10[2]?.userId}> (${top10Users[2].tag})\n`;
       }
-
       try {
         await chan.send({ content: msgContent, files: [attach] });
       } catch (err) {
         console.error(`Failed to send leader to guild ${gId}: ${err}`);
       }
-
       const leaderRoleId = config.messageLeaderSystem.roleMessageLeader;
       if (leaderRoleId) {
         const roleObj = currentGuild.roles.cache.get(leaderRoleId);
@@ -342,7 +330,6 @@ async function announceMessageLeaders() {
           }
         }
       }
-
       for (let i = 0; i < Math.min(top10.length, 5); i++) {
         try {
           await incrementMessageLeaderWins(top10[i].userId);
@@ -350,11 +337,10 @@ async function announceMessageLeaders() {
           console.error(`Increment wins error: ${err}`);
         }
       }
-
       for (const it of allItems) {
         if (it.userData && it.userData.messages) {
           it.userData.messages = 0;
-          await saveUserData(it.userId, it.userData);
+          await saveUserData(gId, it.userId, it.userData);
         }
       }
     }
@@ -379,8 +365,7 @@ async function assignRole(guildId, userId, roleId) {
 
 // -------------------------
 // MESSAGE HANDLING
-//
-
+// -------------------------
 async function handleUserMessage(guildId, userId, channel, message) {
   try {
     let userRec = await getUserData(guildId, userId);
@@ -411,32 +396,25 @@ async function handleUserMessage(guildId, userId, channel, message) {
         mentionsRepliesCount: { mentions: 0, replies: 0 }
       };
     }
-
     const now = Date.now();
     const today = new Date().toISOString().split('T')[0];
     const sCool = streakCooldowns.get(userId) || 0;
     userRec.lastMessage = { time: now, content: message.content, date: today };
-
     if (!Array.isArray(userRec.channelsParticipated)) {
       userRec.channelsParticipated = [];
     }
     if (!userRec.channelsParticipated.includes(channel.id)) {
       userRec.channelsParticipated.push(channel.id);
     }
-
     if (message.mentions?.users?.has(userId)) {
       userRec.mentionsRepliesCount.mentions += 1;
     }
     if (message.type === 'REPLY') {
       userRec.mentionsRepliesCount.replies += 1;
     }
-
     if (now - sCool < 3000) return;
-
     streakCooldowns.set(userId, now);
-
     const c = await getConfig(guildId);
-
     if (c?.levelSystem?.enabled) {
       const xpGain = Math.max(0, c.levelSystem.xpPerMessage * (userRec.boosters || 1));
       userRec.experience.totalXp += xpGain;
@@ -456,7 +434,6 @@ async function handleUserMessage(guildId, userId, channel, message) {
         }
       }
     }
-
     if (c?.streakSystem?.enabled) {
       if (userRec.threshold > 0) {
         userRec.threshold -= 1;
@@ -469,7 +446,6 @@ async function handleUserMessage(guildId, userId, channel, message) {
         }
         const stChanId = c.streakSystem.channelStreakOutput || channel.id;
         const stChan = channel.guild.channels.cache.get(stChanId);
-
         let milestone = 0;
         let milestoneRole = null;
         for (const key in c.streakSystem) {
@@ -483,12 +459,10 @@ async function handleUserMessage(guildId, userId, channel, message) {
             }
           }
         }
-
         if (milestone) {
           if (!Array.isArray(userRec.milestones)) userRec.milestones = [];
           userRec.milestones.push({ milestone, date: new Date().toISOString() });
         }
-
         const lvlImage = await new canvafy.LevelUp()
             .setAvatar(channel.guild.members.cache.get(userId).user.displayAvatarURL())
             .setBackground(
@@ -501,7 +475,6 @@ async function handleUserMessage(guildId, userId, channel, message) {
             .setOverlayOpacity(0.7)
             .setLevels(userRec.streak - 1, userRec.streak)
             .build();
-
         let sMsg = `🎉 <@${userId}> has upped their streak to ${userRec.streak}!!`;
         if (milestoneRole) {
           sMsg += ` They now have the ${milestone} Day Streak Role!`;
@@ -514,10 +487,8 @@ async function handleUserMessage(guildId, userId, channel, message) {
         }
       }
     }
-
     userRec.messages++;
     userRec.totalMessages++;
-
     if (!Array.isArray(userRec.messageHeatmap)) {
       userRec.messageHeatmap = [];
     }
@@ -527,13 +498,12 @@ async function handleUserMessage(guildId, userId, channel, message) {
     } else {
       userRec.messageHeatmap.push({ date: today, messages: 1 });
     }
-
     await updateUserData(userId, {
       streak: userRec.streak,
       receivedDaily: true,
       highestStreak: userRec.highestStreak,
       messages: userRec.messages,
-      totalMessages: userRec.totalMessages,
+      totalMessages: userRec.totalMessages
     });
   } catch (error) {
     console.error(`Error handling user message for user ${userId} in guild ${guildId}: ${error.message}`);
@@ -549,7 +519,6 @@ async function resetDailyStreaks() {
       const thresh = c.streakSystem?.streakThreshold || 10;
       const today = new Date().toISOString().split('T')[0];
       const all = await listUserData(gId);
-
       for (const { userId, userData } of all) {
         if (!Array.isArray(userData.messageHeatmap)) {
           userData.messageHeatmap = [];
@@ -557,26 +526,22 @@ async function resetDailyStreaks() {
         if (!userData.messageHeatmap.some(x => x.date === today)) {
           userData.messageHeatmap.push({ date: today, messages: 0 });
         }
-
         if (userData.receivedDaily) {
           userData.receivedDaily = false;
         }
         if (userData.threshold !== thresh) {
           userData.threshold = thresh;
         }
-
         if (userData.streak > 0 && userData.threshold > 0 && !userData.receivedDaily) {
           const old = userData.streak;
           userData.streak = 0;
           await removeStreakRoles(gId, userId, c, old);
           userData.lastStreakLoss = new Date().toISOString();
         }
-
         userData.daysTracked = (userData.daysTracked || 0) + 1;
         userData.totalMessages = (userData.totalMessages || 0) + (userData.dailyMessageCount || 0);
         userData.averageMessagesPerDay = userData.totalMessages / userData.daysTracked;
         userData.dailyMessageCount = 0;
-
         if (userData.dailyMessageCount === 0) {
           const lastActiveDate = userData.messageHeatmap.length
               ? new Date(userData.messageHeatmap[userData.messageHeatmap.length - 1].date)
@@ -584,11 +549,9 @@ async function resetDailyStreaks() {
           const inactiveDays = Math.floor((Date.now() - lastActiveDate.getTime()) / (1000 * 60 * 60 * 24));
           userData.longestInactivePeriod = Math.max(userData.longestInactivePeriod || 0, inactiveDays);
         }
-
         if (new Date().getDay() === 0) {
           userData.messagesInCurrentWeek = 0;
         }
-
         await updateUserData(userId, {
           receivedDaily: false,
           threshold: thresh,
@@ -635,12 +598,9 @@ async function removeStreakRoles(guildId, userId, cfg, oldStreak) {
 // -------------------------
 // CONFIGURATION MESSAGE
 // -------------------------
-
 async function sendConfigMessage(guild) {
   try {
-    let c = guild.publicUpdatesChannel
-        || guild.systemChannel
-        || guild.channels.cache.find(x => x.isTextBased());
+    let c = guild.publicUpdatesChannel || guild.systemChannel || guild.channels.cache.find(x => x.isTextBased());
     if (c) {
       const logs = await guild.fetchAuditLogs({ type: 28, limit: 1 });
       const entry = logs.entries.first();
@@ -656,6 +616,9 @@ async function sendConfigMessage(guild) {
   }
 }
 
+// -------------------------
+// REPORT GENERATION
+// -------------------------
 async function generateWeeklyReport(guildId) {
   try {
     const c = await getConfig(guildId);
@@ -710,6 +673,11 @@ async function generateMonthlyReport(guildId) {
   }
 }
 
-client.on('guildMemberRemove', async () => {});
+// -------------------------
+// END OF INDEX.JS
+// -------------------------
+client.on('guildMemberRemove', async () => {
+  // when becomes necessary add logic here to keep things clean,
+});
 
 client.login(token).catch(console.error);

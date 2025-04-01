@@ -36,7 +36,6 @@ async function getUserData(guildId, userId) {
 async function saveUserData(guildId, userId, userData) {
   userData.lastUpdated = new Date().toISOString();
   userData.expireAt = getNextMidnightTimestamp();
-
   try {
     const params = {
       TableName: TABLE_NAME,
@@ -56,7 +55,6 @@ async function listUserData(guildId) {
   const params = { TableName: TABLE_NAME };
   let allItems = [];
   let lastEvaluatedKey = null;
-
   try {
     do {
       if (lastEvaluatedKey) {
@@ -68,13 +66,9 @@ async function listUserData(guildId) {
       }
       lastEvaluatedKey = data.LastEvaluatedKey;
     } while (lastEvaluatedKey);
-
     const final = [];
     for (const item of allItems) {
-      if (item.DiscordId && item.hasOwnProperty('messages')) {
-        final.push({ userId: item.DiscordId, userData: item });
-      } else if (item.DiscordId && !item.attribute) {
-        // main user record
+      if (item.DiscordId && !item.hasOwnProperty('attribute')) {
         final.push({ userId: item.DiscordId, userData: item });
       }
     }
@@ -90,10 +84,12 @@ async function incrementMessageLeaderWins(userId) {
     const params = {
       TableName: TABLE_NAME,
       Key: { DiscordId: userId },
-      UpdateExpression: "SET messageLeaderWins = if_not_exists(messageLeaderWins, :zero) + :inc",
+      UpdateExpression: "SET messageLeaderWins = if_not_exists(messageLeaderWins, :zero) + :inc, lastUpdated = :updated, expireAt = :expire",
       ExpressionAttributeValues: {
         ":inc": 1,
-        ":zero": 0
+        ":zero": 0,
+        ":updated": new Date().toISOString(),
+        ":expire": getNextMidnightTimestamp()
       }
     };
     await ddbDocClient.send(new UpdateCommand(params));
@@ -106,17 +102,14 @@ async function incrementMessageLeaderWins(userId) {
 async function updateUserData(userId, updates) {
   updates.lastUpdated = new Date().toISOString();
   updates.expireAt = getNextMidnightTimestamp();
-
   const updateExpressions = [];
   const expressionAttributeNames = {};
   const expressionAttributeValues = {};
-
   for (const key of Object.keys(updates)) {
     updateExpressions.push(`#${key} = :${key}`);
     expressionAttributeNames[`#${key}`] = key;
     expressionAttributeValues[`:${key}`] = updates[key];
   }
-
   try {
     const params = {
       TableName: TABLE_NAME,
