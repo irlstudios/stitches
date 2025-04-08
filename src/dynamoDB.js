@@ -152,12 +152,12 @@ async function saveUserData(guildId, userId, userData) {
   }
 
   const itemsToPut = [primaryItem];
-  for (const attrName of LEADERBOARD_ATTRIBUTES) {
+  for (const attributeName of LEADERBOARD_ATTRIBUTES) {
     let count;
-    if (attrName === 'level') count = userData.experience?.level;
-    else if (attrName === 'totalXp') count = userData.experience?.totalXp;
-    else count = userData[attrName];
-    const attributeItem = createAttributeItem(primaryGuildId, primaryUserId, attrName, count);
+    if (attributeName === 'level') count = userData.experience?.level;
+    else if (attributeName === 'totalXp') count = userData.experience?.totalXp;
+    else count = userData[attributeName];
+    const attributeItem = createAttributeItem(primaryGuildId, primaryUserId, attributeName, count);
     if (attributeItem) itemsToPut.push(attributeItem);
   }
 
@@ -228,14 +228,14 @@ async function updateUserData(guildId, userId, updates) {
 
   const attributePutPromises = [];
   for (const key of updateKeys) {
-    let attrName = key, count = updates[key];
-    if (key.startsWith('experience.')) attrName = key.split('.')[1];
-    if (LEADERBOARD_ATTRIBUTES.includes(attrName)) {
-      const attributeItem = createAttributeItem(primaryGuildId, primaryUserId, attrName, count);
+    let attributeName = key, count = updates[key];
+    if (key.startsWith('experience.')) attributeName = key.split('.')[1];
+    if (LEADERBOARD_ATTRIBUTES.includes(attributeName)) {
+      const attributeItem = createAttributeItem(primaryGuildId, primaryUserId, attributeName, count);
       if (attributeItem) {
         attributePutPromises.push(
             ddbDocClient.send(new PutCommand({ TableName: TABLE_NAME, Item: attributeItem })).catch(error => {
-              console.error(`[DynamoDB] Error putting attribute ${attrName} during update for ${userId}:`, error);
+              console.error(`[DynamoDB] Error putting attribute ${attributeName} during update for ${userId}:`, error);
               return null;
             })
         );
@@ -316,10 +316,10 @@ async function queryLeaderboard(attributeName, guildId, limit = 10) {
   try {
     const params = {
       TableName: TABLE_NAME, IndexName: ATTRIBUTE_INDEX_NAME,
-      KeyConditionExpression: '#attrName = :attrNameVal',
+      KeyConditionExpression: '#attributeName = :attributeNameVal',
       FilterExpression: '#gid = :gidVal',
-      ExpressionAttributeNames: { '#attrName': 'attributeName', '#gid': 'guildId' },
-      ExpressionAttributeValues: { ':attrNameVal': attributeName, ':gidVal': String(guildId) },
+      ExpressionAttributeNames: { '#attributeName': 'attributeName', '#gid': 'guildId' },
+      ExpressionAttributeValues: { ':attributeNameValue': attributeName, ':gidVal': String(guildId) },
       ScanIndexForward: false,
       Limit: Math.max(1, Math.min(limit, 100))
     };
@@ -339,7 +339,7 @@ module.exports = {
   getRawUserData,
   saveUserData,   // Uses Puts
   updateUserData, // Uses Update+Puts
-  listUserData,
+  listUserData,``
   incrementMessageLeaderWins,
   queryLeaderboard
 };
