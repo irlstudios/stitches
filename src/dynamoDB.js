@@ -19,12 +19,12 @@ let credentialsProvider;
 const personalKeyId = process.env.PERSONAL_AWS_ACCESS_KEY_ID;
 const personalSecretKey = process.env.PERSONAL_AWS_SECRET_ACCESS_KEY;
 
+
 if (personalKeyId && personalSecretKey) {
   console.log("[Credentials] PERSONAL AWS keys detected in environment.");
   credentialsProvider = async () => {
-    console.log("[Credentials] Providing credentials directly from PERSONAL environment variables.");
     if (!personalKeyId || !personalSecretKey) {
-      throw new Error("PERSONAL AWS keys seem to have disappeared or are empty.");
+      throw new Error("PERSONAL AWS keys were present at startup but are now missing/empty.");
     }
     if (personalKeyId.length < 16 || personalSecretKey.length < 30) {
       console.warn("[Credentials] Warning: PERSONAL AWS keys appear unusually short.");
@@ -37,8 +37,21 @@ if (personalKeyId && personalSecretKey) {
   console.log("[Credentials] Configured to use direct provider for PERSONAL keys.");
 
 } else {
-  console.log("[Credentials] PERSONAL AWS keys not found or incomplete. Using default AWS credential provider chain.");
+  console.log("[Credentials] PERSONAL AWS keys not found or incomplete. Using default AWS credential provider chain (EC2 Role, standard ENV, ~/.aws/credentials, etc.).");
   credentialsProvider = defaultProvider();
+}
+
+let ddbClient;
+try {
+  // console.log(`[Credentials] Initializing DynamoDBClient with region: ${AWS_REGION}.`);
+  ddbClient = new DynamoDBClient({
+    region: AWS_REGION,
+    credentials: credentialsProvider
+  });
+  console.log("[Credentials] DynamoDBClient initialization successful.");
+} catch (clientInitError) {
+  console.error("[Credentials] CRITICAL ERROR initializing DynamoDBClient:", clientInitError);
+  process.exit(1);
 }
 
 let ddbClient;
