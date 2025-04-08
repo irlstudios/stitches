@@ -41,7 +41,6 @@ if (personalKeyId && personalSecretKey) {
   credentialsProvider = defaultProvider();
 }
 
-let ddbClient;
 try {
   // console.log(`[Credentials] Initializing DynamoDBClient with region: ${AWS_REGION}.`);
   ddbClient = new DynamoDBClient({
