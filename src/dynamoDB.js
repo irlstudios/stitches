@@ -12,7 +12,7 @@ const {
 const { defaultProvider } = require("@aws-sdk/credential-provider-node");
 
 const TABLE_NAME = process.env.DYNAMODB_TABLE || "DiscordAccounts";
-const AWS_REGION = process.env.AWS_REGION || "us-east-2";
+const AWS_REGION = process.env.AWS_REGION || "us-east-1";
 const ATTRIBUTE_INDEX_NAME = "attributeName-count-index";
 
 let credentialsProvider;
