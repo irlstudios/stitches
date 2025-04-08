@@ -1,4 +1,3 @@
-// src/dynamoDB.js
 require('dotenv').config();
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const {
@@ -8,49 +7,37 @@ const {
   ScanCommand,
   UpdateCommand,
   QueryCommand
-} = require("@aws-sdk/lib-dynamodb"); // Removed BatchWriteCommand import again
+} = require("@aws-sdk/lib-dynamodb");
 const { defaultProvider } = require("@aws-sdk/credential-provider-node");
 
 const TABLE_NAME = process.env.DYNAMODB_TABLE || "DiscordAccounts";
-const AWS_REGION = process.env.AWS_REGION || "us-east-1"; // Double-check this region!
+const AWS_REGION = process.env.AWS_REGION || "us-east-1";
 const ATTRIBUTE_INDEX_NAME = "attributeName-count-index";
 
-// --- Define Credential Provider Logic FIRST ---
 let credentialsProvider;
 const personalKeyId = process.env.PERSONAL_AWS_ACCESS_KEY_ID;
 const personalSecretKey = process.env.PERSONAL_AWS_SECRET_ACCESS_KEY;
 
 if (personalKeyId && personalSecretKey) {
-  console.log("[Credentials] PERSONAL AWS keys detected in environment.");
   credentialsProvider = async () => {
     if (!personalKeyId || !personalSecretKey) { throw new Error("PERSONAL AWS keys missing/empty."); }
     if (personalKeyId.length < 16 || personalSecretKey.length < 30) { console.warn("[Credentials] Warning: PERSONAL AWS keys appear short."); }
     return { accessKeyId: personalKeyId, secretAccessKey: personalSecretKey };
   };
-  console.log("[Credentials] Configured to use direct provider for PERSONAL keys.");
 } else {
-  console.log("[Credentials] PERSONAL AWS keys not found. Using default AWS credential provider chain.");
   credentialsProvider = defaultProvider();
 }
 
-// --- Initialize DynamoDB Client SECOND, using the defined provider ---
-let ddbClient; // Declare only once
+let ddbClient;
 try {
-  // console.log(`[Credentials] Initializing DynamoDBClient with region: ${AWS_REGION}.`);
-  ddbClient = new DynamoDBClient({
-    region: AWS_REGION,
-    credentials: credentialsProvider // Pass the selected provider function
-  });
-  console.log("[Credentials] DynamoDBClient initialization successful.");
+  ddbClient = new DynamoDBClient({ region: AWS_REGION, credentials: credentialsProvider });
 } catch (clientInitError) {
   console.error("[Credentials] CRITICAL ERROR initializing DynamoDBClient:", clientInitError);
   process.exit(1);
 }
 
-// --- Create Document Client THIRD, from the initialized base client ---
 const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
 
-// --- Utility Functions ---
 function getNextMidnightTimestamp() {
   const now = new Date();
   const nextMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
@@ -67,9 +54,7 @@ const LEADERBOARD_ATTRIBUTES = [
 const EXPIRING_ATTRIBUTES = [
   'streak',
   'activeDaysCount'
-  // 'messages' is reset weekly, not expired daily
 ];
-
 
 function createAttributeItem(guildId, userId, attributeName, count) {
   if (typeof count !== 'number' || isNaN(count)) {
@@ -92,14 +77,11 @@ function createAttributeItem(guildId, userId, attributeName, count) {
   return item;
 }
 
-
-/**
- * Fetches the RAW user item from DynamoDB.
- * @param {string} userId - The Discord User ID.
- * @returns {Promise<object|null>} The raw DynamoDB item or null.
- */
 async function getRawUserData(userId) {
-  if (!userId) { console.error("[DynamoDB] getRawUserData missing userId."); return null; }
+  if (!userId) {
+    console.error("[DynamoDB] getRawUserData missing userId.");
+    return null;
+  }
   try {
     const params = { TableName: TABLE_NAME, Key: { DiscordId: String(userId) } };
     const { Item } = await ddbDocClient.send(new GetCommand(params));
@@ -110,12 +92,6 @@ async function getRawUserData(userId) {
   }
 }
 
-/**
- * Fetches the nested 'userData' map if the item exists and is in the new format.
- * @param {string} guildId - The guild ID (for context).
- * @param {string} userId - The Discord User ID.
- * @returns {Promise<object|null>} The 'userData' object or null.
- */
 async function getUserData(guildId, userId) {
   const rawItem = await getRawUserData(userId);
   if (rawItem && typeof rawItem.userData === 'object' && rawItem.userData !== null) {
@@ -124,13 +100,6 @@ async function getUserData(guildId, userId) {
   return null;
 }
 
-
-/**
- * Saves the primary user data AND all leaderboard attribute items using individual PutCommands.
- * @param {string} guildId - The ID of the guild.
- * @param {string} userId - The Discord User ID.
- * @param {object} userData - The complete user data object (the nested map).
- */
 async function saveUserData(guildId, userId, userData) {
   if (!userId || !guildId || !userData) { console.error("[DynamoDB] saveUserData missing args."); return; }
   const now = new Date().toISOString();
@@ -152,12 +121,12 @@ async function saveUserData(guildId, userId, userData) {
   }
 
   const itemsToPut = [primaryItem];
-  for (const attributeName of LEADERBOARD_ATTRIBUTES) {
+  for (const attrName of LEADERBOARD_ATTRIBUTES) {
     let count;
-    if (attributeName === 'level') count = userData.experience?.level;
-    else if (attributeName === 'totalXp') count = userData.experience?.totalXp;
-    else count = userData[attributeName];
-    const attributeItem = createAttributeItem(primaryGuildId, primaryUserId, attributeName, count);
+    if (attrName === 'level') count = userData.experience?.level;
+    else if (attrName === 'totalXp') count = userData.experience?.totalXp;
+    else count = userData[attrName];
+    const attributeItem = createAttributeItem(primaryGuildId, primaryUserId, attrName, count);
     if (attributeItem) itemsToPut.push(attributeItem);
   }
 
@@ -180,14 +149,6 @@ async function saveUserData(guildId, userId, userData) {
   }
 }
 
-
-/**
- * Updates specific fields in the primary user data item (using UpdateCommand)
- * AND updates/creates corresponding attribute items (using individual PutCommands).
- * @param {string} guildId - The ID of the guild.
- * @param {string} userId - The Discord User ID.
- * @param {object} updates - An object containing fields to update within the 'userData' map.
- */
 async function updateUserData(guildId, userId, updates) {
   if (!userId || !guildId) { console.error("[DynamoDB] updateUserData missing args."); return; }
   const updateKeys = Object.keys(updates);
@@ -228,14 +189,14 @@ async function updateUserData(guildId, userId, updates) {
 
   const attributePutPromises = [];
   for (const key of updateKeys) {
-    let attributeName = key, count = updates[key];
-    if (key.startsWith('experience.')) attributeName = key.split('.')[1];
-    if (LEADERBOARD_ATTRIBUTES.includes(attributeName)) {
-      const attributeItem = createAttributeItem(primaryGuildId, primaryUserId, attributeName, count);
+    let attrName = key, count = updates[key];
+    if (key.startsWith('experience.')) attrName = key.split('.')[1];
+    if (LEADERBOARD_ATTRIBUTES.includes(attrName)) {
+      const attributeItem = createAttributeItem(primaryGuildId, primaryUserId, attrName, count);
       if (attributeItem) {
         attributePutPromises.push(
             ddbDocClient.send(new PutCommand({ TableName: TABLE_NAME, Item: attributeItem })).catch(error => {
-              console.error(`[DynamoDB] Error putting attribute ${attributeName} during update for ${userId}:`, error);
+              console.error(`[DynamoDB] Error putting attribute ${attrName} during update for ${userId}:`, error);
               return null;
             })
         );
@@ -257,11 +218,6 @@ async function updateUserData(guildId, userId, updates) {
   }
 }
 
-/**
- * Lists primary user data items for a specific guild.
- * @param {string} guildId - The ID of the guild to filter by.
- * @returns {Promise<Array<{userId: string, userData: object}>>} Array of primary user data objects.
- */
 async function listUserData(guildId) {
   if (!guildId) { console.error("[DynamoDB] listUserData missing guildId."); return []; }
   const params = {
@@ -286,11 +242,6 @@ async function listUserData(guildId) {
   }
 }
 
-/**
- * Increments the messageLeaderWins count.
- * @param {string} guildId - The ID of the guild.
- * @param {string} userId - The Discord User ID.
- */
 async function incrementMessageLeaderWins(guildId, userId) {
   if (!userId || !guildId) { console.error("[DynamoDB] incrementMessageLeaderWins missing args."); return; }
   try {
@@ -303,23 +254,23 @@ async function incrementMessageLeaderWins(guildId, userId) {
   }
 }
 
-/**
- * Queries the leaderboard GSI for a specific attribute.
- * @param {string} attributeName - The name of the attribute to query.
- * @param {string} guildId - The guild ID to filter results by.
- * @param {number} limit - The maximum number of items to return.
- * @returns {Promise<Array<object>>} Array of leaderboard items sorted descending by count.
- */
 async function queryLeaderboard(attributeName, guildId, limit = 10) {
   if (!attributeName || !guildId) { console.error("[DynamoDB] queryLeaderboard missing args."); return []; }
   if (!LEADERBOARD_ATTRIBUTES.includes(attributeName)) { console.error(`[DynamoDB] queryLeaderboard invalid attr: ${attributeName}`); return []; }
   try {
     const params = {
-      TableName: TABLE_NAME, IndexName: ATTRIBUTE_INDEX_NAME,
-      KeyConditionExpression: '#attributeName = :attributeNameVal',
+      TableName: TABLE_NAME,
+      IndexName: ATTRIBUTE_INDEX_NAME,
+      KeyConditionExpression: '#attrName = :attrNameVal',
       FilterExpression: '#gid = :gidVal',
-      ExpressionAttributeNames: { '#attributeName': 'attributeName', '#gid': 'guildId' },
-      ExpressionAttributeValues: { ':attributeNameValue': attributeName, ':gidVal': String(guildId) },
+      ExpressionAttributeNames: {
+        '#attrName': 'attributeName',
+        '#gid': 'guildId'
+      },
+      ExpressionAttributeValues: {
+        ':attrNameVal': attributeName,
+        ':gidVal': String(guildId)
+      },
       ScanIndexForward: false,
       Limit: Math.max(1, Math.min(limit, 100))
     };
@@ -329,16 +280,16 @@ async function queryLeaderboard(attributeName, guildId, limit = 10) {
     console.error(`[DynamoDB] Error querying leaderboard for attr "${attributeName}" guild ${guildId}:`, error);
     if (error.name === 'ResourceNotFoundException') console.error(`[DynamoDB] GSI "${ATTRIBUTE_INDEX_NAME}" not found.`);
     else if (error.name === 'ValidationException' && (error.message.includes('NUMBER'))) console.error(`[DynamoDB] GSI "${ATTRIBUTE_INDEX_NAME}" sort key 'count' MUST be Number type!`);
+    else if (error.name === 'ValidationException') console.error(`[DynamoDB] Query Validation Error: ${error.message}`);
     return [];
   }
 }
 
-// Ensure all necessary functions are exported
 module.exports = {
   getUserData,
   getRawUserData,
-  saveUserData,   // Uses Puts
-  updateUserData, // Uses Update+Puts
+  saveUserData,
+  updateUserData,
   listUserData,
   incrementMessageLeaderWins,
   queryLeaderboard
