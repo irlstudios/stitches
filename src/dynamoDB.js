@@ -339,7 +339,7 @@ module.exports = {
   getRawUserData,
   saveUserData,   // Uses Puts
   updateUserData, // Uses Update+Puts
-  listUserData,``
+  listUserData,
   incrementMessageLeaderWins,
   queryLeaderboard
 };
