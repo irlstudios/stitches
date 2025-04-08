@@ -19,30 +19,7 @@ let credentialsProvider;
 const personalKeyId = process.env.PERSONAL_AWS_ACCESS_KEY_ID;
 const personalSecretKey = process.env.PERSONAL_AWS_SECRET_ACCESS_KEY;
 
-
-if (personalKeyId && personalSecretKey) {
-  console.log("[Credentials] PERSONAL AWS keys detected in environment.");
-  credentialsProvider = async () => {
-    if (!personalKeyId || !personalSecretKey) {
-      throw new Error("PERSONAL AWS keys were present at startup but are now missing/empty.");
-    }
-    if (personalKeyId.length < 16 || personalSecretKey.length < 30) {
-      console.warn("[Credentials] Warning: PERSONAL AWS keys appear unusually short.");
-    }
-    return {
-      accessKeyId: personalKeyId,
-      secretAccessKey: personalSecretKey,
-    };
-  };
-  console.log("[Credentials] Configured to use direct provider for PERSONAL keys.");
-
-} else {
-  console.log("[Credentials] PERSONAL AWS keys not found or incomplete. Using default AWS credential provider chain (EC2 Role, standard ENV, ~/.aws/credentials, etc.).");
-  credentialsProvider = defaultProvider();
-}
-
 try {
-  // console.log(`[Credentials] Initializing DynamoDBClient with region: ${AWS_REGION}.`);
   ddbClient = new DynamoDBClient({
     region: AWS_REGION,
     credentials: credentialsProvider
@@ -67,6 +44,27 @@ try {
 }
 
 const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
+
+if (personalKeyId && personalSecretKey) {
+  console.log("[Credentials] PERSONAL AWS keys detected in environment.");
+  credentialsProvider = async () => {
+    if (!personalKeyId || !personalSecretKey) {
+      throw new Error("PERSONAL AWS keys were present at startup but are now missing/empty.");
+    }
+    if (personalKeyId.length < 16 || personalSecretKey.length < 30) {
+      console.warn("[Credentials] Warning: PERSONAL AWS keys appear unusually short.");
+    }
+    return {
+      accessKeyId: personalKeyId,
+      secretAccessKey: personalSecretKey,
+    };
+  };
+  console.log("[Credentials] Configured to use direct provider for PERSONAL keys.");
+
+} else {
+  console.log("[Credentials] PERSONAL AWS keys not found or incomplete. Using default AWS credential provider chain (EC2 Role, standard ENV, ~/.aws/credentials, etc.).");
+  credentialsProvider = defaultProvider();
+}
 
 function getNextMidnightTimestamp() {
   const now = new Date();
