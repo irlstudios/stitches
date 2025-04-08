@@ -1,49 +1,55 @@
-const { Collection, StringSelectMenuBuilder, ActionRowBuilder } = require('discord.js');
+const { Collection, StringSelectMenuBuilder, ActionRowBuilder, ChannelType } = require('discord.js');
 const { set } = require('lodash');
-const { getConfig, saveConfig } = require('./configManager');
+const { getConfig, saveConfig, ensureConfigStructure } = require('./configManager');
 
-const cooldowns = new Collection();
+const commandCooldowns = new Collection();
 
 module.exports = async (client, interaction) => {
   try {
-    if (interaction.isCommand()) {
+    if (interaction.isChatInputCommand()) {
       const command = client.commands.get(interaction.commandName);
       if (!command) {
+        console.warn(`No command matching /${interaction.commandName} was found.`);
         return interaction.reply({
-          content: 'This command is no longer available.',
+          content: `❓ Uh oh! I don't recognize the command \`/${interaction.commandName}\`. It might be outdated or removed.`,
           ephemeral: true,
         });
       }
-
       const now = Date.now();
-      const cooldownAmount = 3000;
-      const timestamps = cooldowns.get(interaction.user.id);
+      const cooldownAmount = (command.cooldown || 3) * 1000;
+      const commandName = interaction.commandName;
+      if (!commandCooldowns.has(commandName)) {
+        commandCooldowns.set(commandName, new Collection());
+      }
+      const timestamps = commandCooldowns.get(commandName);
+      const userTimestamp = timestamps.get(interaction.user.id);
 
-      if (timestamps) {
-        const expirationTime = timestamps + cooldownAmount;
+      if (userTimestamp) {
+        const expirationTime = userTimestamp + cooldownAmount;
         if (now < expirationTime) {
           const timeLeft = (expirationTime - now) / 1000;
           return interaction.reply({
-            content: `Please wait ${timeLeft.toFixed(1)} more second(s) before reusing the \`${interaction.commandName}\` command.`,
+            content: `⏳ Please wait ${timeLeft.toFixed(1)} more second(s) before reusing the \`/${commandName}\` command.`,
             ephemeral: true,
           });
         }
       }
+      timestamps.set(interaction.user.id, now);
+      setTimeout(() => timestamps.delete(interaction.user.id), cooldownAmount);
 
-      cooldowns.set(interaction.user.id, now);
-      setTimeout(() => cooldowns.delete(interaction.user.id), cooldownAmount);
 
       try {
         await command.execute(interaction);
       } catch (error) {
-        console.error(`Error executing command ${interaction.commandName}:`, error);
-        handleInteractionError(interaction, 'There was an error while executing this command!');
+        console.error(`Error executing command /${interaction.commandName}:`, error);
+        await handleInteractionError(interaction, `💥 Oops! Something went wrong while executing the \`/${interaction.commandName}\` command.`);
       }
+
     } else if (interaction.isStringSelectMenu()) {
       const { guild, customId } = interaction;
       if (!guild) {
         return interaction.reply({
-          content: "This action is only available within a server (guild).",
+          content: "This select menu action is only available within a server.",
           ephemeral: true,
         });
       }
@@ -52,425 +58,527 @@ module.exports = async (client, interaction) => {
       try {
         config = await getConfig(guild.id);
         if (!config) {
-          return interaction.reply({
-            content: 'Configuration for this guild is missing.',
+          if (interaction.isRepliable()) {
+            await interaction.reply({
+              content: '⚙️ Bot configuration is missing for this server. An admin needs to run `/setup-bot` first.',
+              ephemeral: true,
+            });
+          }
+          return;
+        }
+      } catch (error) {
+        console.error(`Error loading configuration for guild ${guild.id} in select menu handler:`, error);
+        if (interaction.isRepliable()) {
+          await interaction.reply({
+            content: 'An error occurred while loading server configuration.',
             ephemeral: true,
           });
         }
-      } catch (error) {
-        console.error("Error loading configuration:", error);
-        return interaction.reply({
-          content: 'An error occurred while loading the configuration.',
-          ephemeral: true,
-        });
+        return;
       }
 
       ensureConfigStructure(config);
 
       try {
-        if (customId === 'system-select') {
-          await handleSystemSelect(interaction, config, guild);
-        } else if (customId === 'streak-options') {
-          await handleStreakOptions(interaction, config, guild);
-        } else if (customId === 'leader-options') {
-          await handleLeaderOptions(interaction, config, guild);
-        } else if (customId === 'level-options') {
-          await handleLevelOptions(interaction, config, guild);
-        } else if (customId === 'weeklyReportSystem') {
-          await handleReportOptions(interaction, config, guild);
+        switch (customId) {
+          case 'system-select':
+            await handleSystemSelect(interaction, config);
+            break;
+          case 'streak-options':
+            await handleStreakOptions(interaction, config);
+            break;
+          case 'leader-options':
+            await handleLeaderOptions(interaction, config);
+            break;
+          case 'level-options':
+            await handleLevelOptions(interaction, config);
+            break;
+          case 'report-options':
+            await handleReportOptions(interaction, config);
+            break;
+          case (customId.startsWith('remove_streak_milestone_select_') ? customId : null):
+          case (customId.startsWith('remove_level_milestone_select_') ? customId : null):
+            if (!interaction.deferred && !interaction.replied) {
+              await interaction.deferUpdate();
+            }
+            break;
+          default:
+            console.warn(`Unhandled select menu interaction with ID: ${customId} in guild ${guild.id}`);
+            if (interaction.isRepliable()) {
+              await interaction.reply({ content: "This menu selection is not currently recognized or has expired.", ephemeral: true });
+            }
         }
       } catch (error) {
-        console.error(`Error handling select menu interaction (${customId}):`, error);
-        handleInteractionError(interaction, 'There was an error processing your selection.');
+        console.error(`Error handling select menu interaction (${customId}) in guild ${guild.id}:`, error);
+        await handleInteractionError(interaction, 'There was an error processing your selection.');
       }
     }
   } catch (error) {
-    console.error('Critical error handling interaction:', error);
-    if (!interaction.replied && !interaction.deferred) {
-      await interaction.reply({
-        content: 'A critical error occurred. Please try again later.',
-        ephemeral: true,
-      });
+    console.error('Critical error in interaction handler:', error);
+    if (interaction.isRepliable()) {
+      await handleInteractionError(interaction, 'A critical error occurred. Please try again later or contact support.');
     }
   }
 };
 
 async function handleInteractionError(interaction, errorMessage) {
+  const payload = { content: errorMessage, ephemeral: true, embeds: [], components: [] };
   try {
-    if (!interaction.replied && !interaction.deferred) {
-      await interaction.reply({
-        content: errorMessage,
-        ephemeral: true,
-      });
-    } else if (interaction.deferred) {
-      await interaction.editReply({
-        content: errorMessage,
-      });
+    if (interaction.replied || interaction.deferred) {
+      if (interaction.editable) {
+        await interaction.editReply(payload).catch(console.warn);
+      } else {
+        await interaction.followUp(payload).catch(console.warn);
+      }
+    } else if (interaction.isRepliable()) {
+      await interaction.reply(payload).catch(console.warn);
     }
   } catch (replyError) {
-    console.error('Failed to send error reply:', replyError);
+    console.error('Failed to send error reply to interaction:', replyError);
   }
 }
 
-// Updated to include new attributes for expiration and lastUpdated in config objects
-function ensureConfigStructure(config) {
-  if (!config.streakSystem) {
-    config.streakSystem = {
-      enabled: false,
-      streakThreshold: 10,
-    };
-  }
-  if (!config.messageLeaderSystem) {
-    config.messageLeaderSystem = {
-      enabled: false,
-    };
-  }
-  if (!config.levelSystem) {
-    config.levelSystem = {
-      enabled: false,
-      xpPerMessage: 10,
-      levelMultiplier: 1.5,
-      rewards: {},
-    };
-  }
-  if (!config.reportSettings) {
-    config.reportSettings = {
-      weeklyReportChannel: "",
-      monthlyReportChannel: ""
-    };
-  }
-  // Optional: Set default metadata if not present
-  if (!config.lastUpdated) {
-    config.lastUpdated = new Date().toISOString();
-  }
-  if (!config.expireAt) {
-    config.expireAt = null;
-  }
-}
 
-async function handleSystemSelect(interaction, config, guild) {
-  const system = interaction.values[0];
+async function handleSystemSelect(interaction, config) {
+  if (!config) {
+    console.error("handleSystemSelect called with null config.");
+    return handleInteractionError(interaction, "Configuration error occurred.");
+  }
+
+  const systemKey = interaction.values[0];
   let menu, content;
+  const { guild } = interaction;
 
-  if (system === 'streakSystem') {
-    menu = new StringSelectMenuBuilder()
-        .setCustomId('streak-options')
-        .setPlaceholder('Select a streak system option')
-        .addOptions([
-          { label: 'View Config', value: 'viewStreakConfig' },
-          { label: 'Add Milestone', value: 'addMilestone' },
-          { label: 'Remove Milestone', value: 'removeMilestone' },
-          { label: 'Streak Output Channel', value: 'channelStreakOutput' },
-          { label: 'Streak Threshold', value: 'streakThreshold' },
-          { label: 'Enable Streak System', value: 'enableStreak' },
-          { label: 'Disable Streak System', value: 'disableStreak' },
-        ]);
-    content = 'Configure the Streak System:';
-  } else if (system === 'messageLeaderSystem') {
-    menu = new StringSelectMenuBuilder()
-        .setCustomId('leader-options')
-        .setPlaceholder('Select a message leader system option')
-        .addOptions([
-          { label: 'View Config', value: 'viewLeaderConfig' },
-          { label: 'Message Leader Announcement Channel', value: 'channelMessageLeader' },
-          { label: 'Message Leader Winner Role', value: 'roleMessageLeader' },
-          { label: 'Enable Message Leader System', value: 'enableLeader' },
-          { label: 'Disable Message Leader System', value: 'disableLeader' },
-        ]);
-    content = 'Configure the Message Leader System:';
-  } else if (system === 'levelSystem') {
-    menu = new StringSelectMenuBuilder()
-        .setCustomId('level-options')
-        .setPlaceholder('Select a level system option')
-        .addOptions([
-          { label: 'View Config', value: 'viewLevelConfig' },
-          { label: 'XP per Message', value: 'xpPerMessage' },
-          { label: 'XP Increment', value: 'levelMultiplier' },
-          { label: 'Level-Up Message Channel', value: 'channelLevelUp' },
-          { label: 'Enable Level System', value: 'enableLevel' },
-          { label: 'Disable Level System', value: 'disableLevel' },
-          { label: 'Add Milestone', value: 'addLevelMilestone' },
-          { label: 'Remove Milestone', value: 'removeLevelMilestone' },
-        ]);
-    content = 'Configure the Level System:';
-  } else if (system === 'weeklyReportSystem') {
-    menu = new StringSelectMenuBuilder()
-        .setCustomId('report-options')
-        .setPlaceholder('Select a report system option')
-        .addOptions([
-          { label: 'View Config', value: 'viewReportConfig' },
-          { label: 'Weekly Report Channel', value: 'weeklyReportChannel' },
-          { label: 'Monthly Report Channel', value: 'monthlyReportChannel' }
-        ]);
-    content = 'Configure the Analytics System:';
+  switch (systemKey) {
+    case 'streakSystem':
+      menu = new StringSelectMenuBuilder()
+          .setCustomId('streak-options')
+          .setPlaceholder('Streak System Options')
+          .addOptions([
+            { label: 'View Current Config', value: 'viewStreakConfig', description: "See current streak settings." },
+            { label: 'Toggle System (On/Off)', value: 'toggleStreak', description: `${config.streakSystem?.enabled ? 'Disable' : 'Enable'} the streak system.` },
+            { label: 'Set Output Channel', value: 'channelStreakOutput', description: 'Channel for streak up messages.' },
+            { label: 'Set Streak Threshold', value: 'streakThreshold', description: 'Messages needed daily.' },
+            { label: 'Add Streak Role Milestone', value: 'addMilestone', description: 'Add a role reward for X days.' },
+            { label: 'Remove Streak Role Milestone', value: 'removeMilestone', description: 'Remove a streak role reward.' }
+          ]);
+      content = `Configure the **Streak System** (Currently: ${config.streakSystem?.enabled ? 'Enabled' : 'Disabled'}):`;
+      break;
+
+    case 'messageLeaderSystem':
+      menu = new StringSelectMenuBuilder()
+          .setCustomId('leader-options')
+          .setPlaceholder('Message Leader System Options')
+          .addOptions([
+            { label: 'View Current Config', value: 'viewLeaderConfig', description: "See current message leader settings." },
+            { label: 'Toggle System (On/Off)', value: 'toggleLeader', description: `${config.messageLeaderSystem?.enabled ? 'Disable' : 'Enable'} the leader system.` },
+            { label: 'Set Announcement Channel', value: 'channelMessageLeader', description: 'Channel for weekly winners.' },
+            { label: 'Set Winner Role', value: 'roleMessageLeader', description: 'Role assigned to the winner(s).'}
+          ]);
+      content = `Configure the **Message Leader System** (Currently: ${config.messageLeaderSystem?.enabled ? 'Enabled' : 'Disabled'}):`;
+      break;
+
+    case 'levelSystem':
+      menu = new StringSelectMenuBuilder()
+          .setCustomId('level-options')
+          .setPlaceholder('Level System Options')
+          .addOptions([
+            { label: 'View Current Config', value: 'viewLevelConfig', description: "See current level settings." },
+            { label: 'Toggle System (On/Off)', value: 'toggleLevel', description: `${config.levelSystem?.enabled ? 'Disable' : 'Enable'} the level system.` },
+            { label: 'Set Level Up Channel', value: 'channelLevelUp', description: 'Channel for level up messages.' },
+            { label: 'Set XP Per Message', value: 'xpPerMessage', description: 'XP gained per message.' },
+            { label: 'Set Level Multiplier', value: 'levelMultiplier', description: 'Difficulty increase per level.' },
+            { label: 'Toggle Level Up Messages', value: 'toggleLevelMsgs', description: `${config.levelSystem?.levelUpMessages ? 'Disable' : 'Enable'} level up pings.`},
+            { label: 'Add Level Role Milestone', value: 'addLevelMilestone', description: 'Add a role reward for Level X.' },
+            { label: 'Remove Level Role Milestone', value: 'removeLevelMilestone', description: 'Remove a level role reward.' },
+          ]);
+      content = `Configure the **Level System** (Currently: ${config.levelSystem?.enabled ? 'Enabled' : 'Disabled'}):`;
+      break;
+
+    case 'reportSettings':
+      menu = new StringSelectMenuBuilder()
+          .setCustomId('report-options')
+          .setPlaceholder('Analytics System Options')
+          .addOptions([
+            { label: 'View Current Config', value: 'viewReportConfig', description: "See current report channels." },
+            { label: 'Set Weekly Report Channel', value: 'weeklyReportChannel', description: 'Channel for Sunday reports.' },
+            { label: 'Set Monthly Report Channel', value: 'monthlyReportChannel', description: 'Channel for monthly reports.' }
+          ]);
+      content = 'Configure **Analytics / Reports**:';
+      break;
+
+    default:
+      console.warn(`Unhandled system selection in handleSystemSelect: ${systemKey}`);
+      if (interaction.isRepliable()) await interaction.deferUpdate().catch(console.warn);
+      return;
   }
 
-  const row = new ActionRowBuilder().addComponents(menu);
-  await interaction.update({ content, components: [row] });
+  if (menu) {
+    const row = new ActionRowBuilder().addComponents(menu);
+    await interaction.update({ content, components: [row] });
+  } else {
+    console.error(`No menu generated for valid system key: ${systemKey}`);
+    await interaction.update({ content: "Error generating configuration options.", components: [] });
+  }
 }
 
-async function handleStreakOptions(interaction, config, guild) {
+async function handleStreakOptions(interaction, config) {
   const option = interaction.values[0];
+  const { guild } = interaction;
+  const guildId = guild.id;
 
-  if (option === 'viewStreakConfig') {
-    await interaction.reply({
-      content: `Current Streak System Config:\nEnabled: ${config.streakSystem.enabled}\nThreshold: ${config.streakSystem.streakThreshold}\nMilestones: ${
-          Object.keys(config.streakSystem)
-              .filter(key => key.startsWith('role') && key.endsWith('day'))
-              .map(key => `${key.replace('role', '').replace('day', '')} days`)
-              .join(', ')
-      }`,
-      ephemeral: true,
-    });
-  } else if (option === 'addMilestone') {
-    await addMilestone(interaction, guild, config, guild.id, 'streak');
-  } else if (option === 'removeMilestone') {
-    await removeMilestone(interaction, guild, config, guild.id, 'streak');
-  } else if (option === 'enableStreak' || option === 'disableStreak') {
-    config.streakSystem.enabled = option === 'enableStreak';
-    await saveConfig(guild.id, config);
-    await interaction.update({ content: `Streak System has been ${option === 'enableStreak' ? 'enabled' : 'disabled'}.`, components: [] });
-  } else if (option === 'channelStreakOutput') {
-    await setChannel(interaction, guild, config, guild.id, 'streakSystem.channelStreakOutput', 'Streak Output Channel');
-  } else if (option === 'streakThreshold') {
-    await setThreshold(interaction, config, guild.id, 'streakSystem.streakThreshold', 'Streak threshold');
-  }
-}
+  if (!guild) return handleInteractionError(interaction, "Could not resolve guild information.");
 
-async function handleLeaderOptions(interaction, config, guild) {
-  const option = interaction.values[0];
+  switch (option) {
+    case 'viewStreakConfig': {
+      const streakSystem = config.streakSystem || {};
+      const milestones = Object.entries(streakSystem)
+          .filter(([key, value]) => key.startsWith('role') && key.endsWith('day') && value)
+          .map(([key, value]) => {
+            const days = key.replace('role', '').replace('day', '');
+            const roleName = guild.roles.cache.get(value)?.name || 'Unknown/Deleted Role';
+            return `> ${days} Days: @${roleName}`;
+          })
+          .join('\n') || '> None set';
+      const outputChannelId = streakSystem.channelStreakOutput;
+      const outputChannelName = outputChannelId ? `<#${outputChannelId}>` : 'Not Set';
+      const enabledText = streakSystem.enabled ? '✅ Yes' : '❌ No';
+      const threshold = streakSystem.streakThreshold ?? 'Not Set';
 
-  if (option === 'viewLeaderConfig') {
-    await interaction.reply({
-      content: `Current Message Leader System Config:\nEnabled: ${config.messageLeaderSystem.enabled}\nAnnouncement Channel: <#${config.messageLeaderSystem.channelMessageLeader || 'Not Set'}>\nWinner Role: <@&${config.messageLeaderSystem.roleMessageLeader || 'Not Set'}>`,
-      ephemeral: true,
-    });
-  } else if (option === 'enableLeader' || option === 'disableLeader') {
-    config.messageLeaderSystem.enabled = option === 'enableLeader';
-    await saveConfig(guild.id, config);
-    await interaction.update({ content: `Message Leader System has been ${option === 'enableLeader' ? 'enabled' : 'disabled'}.`, components: [] });
-  } else if (option === 'channelMessageLeader') {
-    await setChannel(interaction, guild, config, guild.id, 'messageLeaderSystem.channelMessageLeader', 'Message Leader Announcement Channel');
-  } else if (option === 'roleMessageLeader') {
-    await setRole(interaction, guild, config, guild.id, 'messageLeaderSystem.roleMessageLeader', 'Message Leader Role');
-  }
-}
-
-async function handleLevelOptions(interaction, config, guild) {
-  const option = interaction.values[0];
-
-  if (option === 'viewLevelConfig') {
-    await interaction.reply({
-      content: `Current Level System Config:\nEnabled: ${config.levelSystem.enabled}\nXP per Message: ${config.levelSystem.xpPerMessage}\nXP Increment: ${config.levelSystem.levelMultiplier}\nLevel-Up Message Channel: <#${config.levelSystem.channelLevelUp || 'Not Set'}>\nMilestones: ${
-          Object.keys(config.levelSystem)
-              .filter(key => key.startsWith('role') && key.includes('Level'))
-              .map(key => `${key.replace('roleLevel', 'Level ')}`)
-              .join(', ')
-      }`,
-      ephemeral: true,
-    });
-  } else if (option === 'enableLevel' || option === 'disableLevel') {
-    config.levelSystem.enabled = option === 'enableLevel';
-    await saveConfig(guild.id, config);
-    await interaction.update({ content: `Level System has been ${option === 'enableLevel' ? 'enabled' : 'disabled'}.`, components: [] });
-  } else if (option === 'xpPerMessage') {
-    await setThreshold(interaction, config, guild.id, 'levelSystem.xpPerMessage', 'XP per message');
-  } else if (option === 'levelMultiplier') {
-    await setThreshold(interaction, config, guild.id, 'levelSystem.levelMultiplier', 'XP increment per level');
-  } else if (option === 'channelLevelUp') {
-    await setChannel(interaction, guild, config, guild.id, 'levelSystem.channelLevelUp', 'Level-Up Message Channel');
-  } else if (option === 'addLevelMilestone') {
-    await addMilestone(interaction, guild, config, guild.id, 'level');
-  } else if (option === 'removeLevelMilestone') {
-    await removeMilestone(interaction, guild, config, guild.id, 'level');
-  }
-}
-
-async function handleReportOptions(interaction, config, guild) {
-  const option = interaction.values[0];
-
-  if (option === 'viewReportConfig') {
-    await interaction.reply({
-      content: `Current Report Settings:\nWeekly Report Channel: <#${config.reportSettings.weeklyReportChannel || 'Not Set'}>\nMonthly Report Channel: <#${config.reportSettings.monthlyReportChannel || 'Not Set'}>`,
-      ephemeral: true,
-    });
-  } else if (option === 'weeklyReportChannel') {
-    await setChannel(interaction, guild, config, guild.id, 'reportSettings.weeklyReportChannel', 'Weekly Report Channel');
-  } else if (option === 'monthlyReportChannel') {
-    await setChannel(interaction, guild, config, guild.id, 'reportSettings.monthlyReportChannel', 'Monthly Report Channel');
-  }
-}
-
-async function setChannel(interaction, guild, config, guildId, configKey, description) {
-  await interaction.deferReply({ ephemeral: true });
-  await interaction.followUp({ content: `Please mention the channel for ${description} (e.g., #channel-name):` });
-
-  const filter = (msg) =>
-      msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;
-
-  const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
-
-  collector.on('collect', async (msg) => {
-    const channel = msg.mentions.channels.first();
-    await msg.delete();
-    if (!channel || !channel.isTextBased()) {
-      await interaction.followUp({ content: 'Please mention a valid text channel.', ephemeral: true });
-    } else {
-      set(config, configKey, channel.id);
-      await saveConfig(guildId, config);
-      await interaction.followUp({ content: `${description} has been set to ${channel.name}.`, ephemeral: true });
-    }
-  });
-
-  collector.on('end', (collected) => {
-    if (collected.size === 0) {
-      interaction.followUp({ content: 'Time ran out. Please try the command again.', ephemeral: true });
-    }
-  });
-}
-
-async function setThreshold(interaction, config, guildId, configKey, description) {
-  await interaction.deferReply({ ephemeral: true });
-  await interaction.followUp({ content: `Please enter the ${description}:` });
-
-  const filter = (msg) =>
-      msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;
-
-  const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
-
-  collector.on('collect', async (msg) => {
-    const value = parseFloat(msg.content);
-    await msg.delete();
-    if (isNaN(value) || value <= 0) {
-      await interaction.followUp({ content: 'Please provide a valid number.', ephemeral: true });
-    } else {
-      set(config, configKey, value);
-      await saveConfig(guildId, config);
-      await interaction.followUp({ content: `${description} has been set to ${value}.`, ephemeral: true });
-    }
-  });
-
-  collector.on('end', (collected) => {
-    if (collected.size === 0) {
-      interaction.followUp({ content: 'Time ran out. Please try the command again.', ephemeral: true });
-    }
-  });
-}
-
-async function setRole(interaction, guild, config, guildId, configKey, description) {
-  await interaction.deferReply({ ephemeral: true });
-  await interaction.followUp({ content: `Please mention the role for ${description} (e.g., @role-name):` });
-
-  const filter = (msg) =>
-      msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;
-
-  const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
-
-  collector.on('collect', async (msg) => {
-    const role = msg.mentions.roles.first();
-    await msg.delete();
-    if (!role) {
-      await interaction.followUp({ content: 'Please mention a valid role.', ephemeral: true });
-    } else {
-      set(config, configKey, role.id);
-      await saveConfig(guildId, config);
-      await interaction.followUp({ content: `${description} has been set to ${role.name}.`, ephemeral: true });
-    }
-  });
-
-  collector.on('end', (collected) => {
-    if (collected.size === 0) {
-      interaction.followUp({ content: 'Time ran out. Please try the command again.', ephemeral: true });
-    }
-  });
-}
-
-async function addMilestone(interaction, guild, config, guildId, systemType) {
-  await interaction.deferReply({ ephemeral: true });
-  await interaction.followUp({ content: `Please enter the number of days/level for the milestone (e.g., 5 for 5-day streak or 5 for Level 5):` });
-
-  const filter = (msg) =>
-      msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;
-
-  const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
-
-  collector.on('collect', async (msg) => {
-    const milestone = parseInt(msg.content, 10);
-    await msg.delete();
-    if (isNaN(milestone) || milestone <= 0) {
-      await interaction.followUp({ content: 'Please provide a valid number.', ephemeral: true });
-    } else {
-      const roleName = systemType === 'streak' ? `${milestone} Day Streak` : `Level ${milestone}`;
-      let milestoneRole = guild.roles.cache.find(role => role.name === roleName);
-      if (!milestoneRole) {
-        milestoneRole = await guild.roles.create({
-          name: roleName,
-          color: '#00FF00',
-          reason: `Role for users with a ${milestone}-day streak or reaching Level ${milestone}`,
-        });
-      }
-      if (systemType === 'streak') {
-        config.streakSystem[`role${milestone}day`] = milestoneRole.id;
-      } else {
-        config.levelSystem[`roleLevel${milestone}`] = milestoneRole.id;
-      }
-      await saveConfig(guildId, config);
-      await interaction.followUp({
-        content: `Milestone for ${milestone} ${systemType === 'streak' ? 'days' : 'level'} has been added.`,
+      await interaction.reply({
+        content: `**Streak System Config:**\nEnabled: ${enabledText}\nThreshold: \`${threshold}\` messages/day\nOutput Channel: ${outputChannelName}\nMilestones:\n${milestones}`,
         ephemeral: true,
       });
+      break;
     }
-  });
-
-  collector.on('end', (collected) => {
-    if (collected.size === 0) {
-      interaction.followUp({ content: 'Time ran out. Please try the command again.', ephemeral: true });
-    }
-  });
+    case 'toggleStreak':
+      config.streakSystem.enabled = !config.streakSystem.enabled;
+      await saveConfig(guildId, config);
+      await interaction.update({ content: `✅ Streak System has been **${config.streakSystem.enabled ? 'enabled' : 'disabled'}**.`, components: [] });
+      break;
+    case 'channelStreakOutput':
+      await setChannel(interaction, config, guildId, 'streakSystem.channelStreakOutput', 'Streak Output Channel');
+      break;
+    case 'streakThreshold':
+      await setNumericValue(interaction, config, guildId, 'streakSystem.streakThreshold', 'Streak threshold (daily messages required)', { min: 1, max: 100, integer: true });
+      break;
+    case 'addMilestone':
+      await addMilestone(interaction, config, guildId, 'streak');
+      break;
+    case 'removeMilestone':
+      await removeMilestone(interaction, config, guildId, 'streak');
+      break;
+    default:
+      console.warn(`Unknown streak option: ${option}`);
+      await interaction.reply({ content: 'Unknown streak option selected.', ephemeral: true });
+  }
 }
 
-async function removeMilestone(interaction, guild, config, guildId, systemType) {
-  await interaction.deferReply({ ephemeral: true });
-  await interaction.followUp({ content: `Please enter the number of days/level for the milestone to remove:` });
+async function handleLeaderOptions(interaction, config) {
+  const option = interaction.values[0];
+  const { guild } = interaction;
+  const guildId = guild.id;
+  if (!guild) return handleInteractionError(interaction, "Could not resolve guild information.");
 
-  const filter = (msg) =>
-      msg.author.id === interaction.user.id && msg.guild.id === interaction.guild.id;
+  const leaderSystem = config.messageLeaderSystem || {};
 
-  const collector = interaction.channel.createMessageCollector({ filter, time: 15000, max: 1 });
+  switch (option) {
+    case 'viewLeaderConfig': {
+      const channelId = leaderSystem.channelMessageLeader;
+      const roleId = leaderSystem.roleMessageLeader;
+      const channelName = channelId ? `<#${channelId}>` : 'Not Set';
+      const roleName = roleId ? `<@&${roleId}>` : 'Not Set';
+      const enabledText = leaderSystem.enabled ? '✅ Yes' : '❌ No';
 
-  collector.on('collect', async (msg) => {
-    const milestone = parseInt(msg.content, 10);
-    await msg.delete();
-    if (isNaN(milestone) || milestone <= 0) {
-      await interaction.followUp({ content: 'Please provide a valid number.', ephemeral: true });
-    } else {
-      const roleKey = systemType === 'streak' ? `role${milestone}day` : `roleLevel${milestone}`;
-      const milestoneRoleId = systemType === 'streak'
-          ? config.streakSystem[roleKey]
-          : config.levelSystem[roleKey];
-      if (!milestoneRoleId) {
-        return interaction.followUp({ content: `No milestone for ${milestone} ${systemType === 'streak' ? 'days' : 'level'} found.`, ephemeral: true });
-      }
-      const milestoneRole = guild.roles.cache.get(milestoneRoleId);
-      if (milestoneRole) {
-        await milestoneRole.delete();
-      }
-      if (systemType === 'streak') {
-        delete config.streakSystem[roleKey];
-      } else {
-        delete config.levelSystem[roleKey];
-      }
-      await saveConfig(guildId, config);
-      await interaction.followUp({
-        content: `Milestone for ${milestone} ${systemType === 'streak' ? 'days' : 'level'} has been removed.`,
+      await interaction.reply({
+        content: `**Message Leader System Config:**\nEnabled: ${enabledText}\nAnnouncement Channel: ${channelName}\nWinner Role: ${roleName}`,
         ephemeral: true,
       });
+      break;
     }
-  });
+    case 'toggleLeader':
+      config.messageLeaderSystem.enabled = !leaderSystem.enabled;
+      await saveConfig(guildId, config);
+      await interaction.update({ content: `✅ Message Leader System has been **${config.messageLeaderSystem.enabled ? 'enabled' : 'disabled'}**.`, components: [] });
+      break;
+    case 'channelMessageLeader':
+      await setChannel(interaction, config, guildId, 'messageLeaderSystem.channelMessageLeader', 'Message Leader Announcement Channel');
+      break;
+    case 'roleMessageLeader':
+      await setRole(interaction, config, guildId, 'messageLeaderSystem.roleMessageLeader', 'Message Leader Winner Role');
+      break;
+    default:
+      console.warn(`Unknown leader option: ${option}`);
+      await interaction.reply({ content: 'Unknown leader option selected.', ephemeral: true });
+  }
+}
 
-  collector.on('end', (collected) => {
-    if (collected.size === 0) {
-      interaction.followUp({ content: 'Time ran out. Please try the command again.', ephemeral: true });
+async function handleLevelOptions(interaction, config) {
+  const option = interaction.values[0];
+  const { guild } = interaction;
+  const guildId = guild.id;
+  if (!guild) return handleInteractionError(interaction, "Could not resolve guild information.");
+
+  const levelSystem = config.levelSystem || {};
+
+  switch(option) {
+    case 'viewLevelConfig': {
+      const milestones = Object.entries(levelSystem)
+          .filter(([key, value]) => key.startsWith('roleLevel') && value)
+          .map(([key, value]) => {
+            const level = key.replace('roleLevel', '');
+            const roleName = guild.roles.cache.get(value)?.name || 'Unknown/Deleted Role';
+            return `> Level ${level}: @${roleName}`;
+          })
+          .join('\n') || '> None set';
+      const channelId = levelSystem.channelLevelUp;
+      const channelName = channelId ? `<#${channelId}>` : 'Current Channel';
+      const enabledText = levelSystem.enabled ? '✅ Yes' : '❌ No';
+      const pingsEnabledText = levelSystem.levelUpMessages ? '✅ Yes' : '❌ No';
+      const xpPerMsg = levelSystem.xpPerMessage ?? 'Not Set';
+      const multiplier = levelSystem.levelMultiplier ?? 'Not Set';
+
+      await interaction.reply({
+        content: `**Level System Config:**\nEnabled: ${enabledText}\nXP Per Message: \`${xpPerMsg}\`\nMultiplier: \`${multiplier}\`\nLevel Up Channel: ${channelName}\nLevel Up Pings: ${pingsEnabledText}\nMilestones:\n${milestones}`,
+        ephemeral: true,
+      });
+      break;
     }
+    case 'toggleLevel':
+      config.levelSystem.enabled = !levelSystem.enabled;
+      await saveConfig(guildId, config);
+      await interaction.update({ content: `✅ Level System has been **${config.levelSystem.enabled ? 'enabled' : 'disabled'}**.`, components: [] });
+      break;
+    case 'channelLevelUp':
+      await setChannel(interaction, config, guildId, 'levelSystem.channelLevelUp', 'Level-Up Message Channel');
+      break;
+    case 'xpPerMessage':
+      await setNumericValue(interaction, config, guildId, 'levelSystem.xpPerMessage', 'XP per message', { min: 0, integer: true });
+      break;
+    case 'levelMultiplier':
+      await setNumericValue(interaction, config, guildId, 'levelSystem.levelMultiplier', 'Level difficulty multiplier', { min: 1.01, max: 5 });
+      break;
+    case 'toggleLevelMsgs':
+      config.levelSystem.levelUpMessages = !levelSystem.levelUpMessages;
+      await saveConfig(guildId, config);
+      await interaction.update({ content: `✅ Level Up Messages have been **${config.levelSystem.levelUpMessages ? 'enabled' : 'disabled'}**.`, components: [] });
+      break;
+    case 'addLevelMilestone':
+      await addMilestone(interaction, config, guildId, 'level');
+      break;
+    case 'removeLevelMilestone':
+      await removeMilestone(interaction, config, guildId, 'level');
+      break;
+    default:
+      console.warn(`Unknown level option: ${option}`);
+      await interaction.reply({ content: 'Unknown level option selected.', ephemeral: true });
+  }
+}
+
+async function handleReportOptions(interaction, config) {
+  const option = interaction.values[0];
+  const { guild } = interaction;
+  const guildId = guild.id;
+  if (!guild) return handleInteractionError(interaction, "Could not resolve guild information.");
+
+  const reportSettings = config.reportSettings || {};
+
+  switch(option) {
+    case 'viewReportConfig': {
+      const weeklyChId = reportSettings.weeklyReportChannel;
+      const monthlyChId = reportSettings.monthlyReportChannel;
+      const weeklyCh = weeklyChId ? `<#${weeklyChId}>` : 'Not Set';
+      const monthlyCh = monthlyChId ? `<#${monthlyChId}>` : 'Not Set';
+
+      await interaction.reply({
+        content: `**Analytics / Report Config:**\nWeekly Report Channel: ${weeklyCh}\nMonthly Report Channel: ${monthlyCh}`,
+        ephemeral: true,
+      });
+      break;
+    }
+    case 'weeklyReportChannel':
+      await setChannel(interaction, config, guildId, 'reportSettings.weeklyReportChannel', 'Weekly Report Channel');
+      break;
+    case 'monthlyReportChannel':
+      await setChannel(interaction, config, guildId, 'reportSettings.monthlyReportChannel', 'Monthly Report Channel');
+      break;
+    default:
+      console.warn(`Unknown report option: ${option}`);
+      await interaction.reply({ content: 'Unknown report option selected.', ephemeral: true });
+  }
+}
+
+async function setChannel(interaction, config, guildId, configKey, description) {
+  await interaction.deferUpdate();
+  await interaction.followUp({
+    content: `Mention the text channel for **${description}**, or type \`clear\` to unset it.`,
+    ephemeral: true, fetchReply: true
   });
+  const filter = (msg) => msg.author.id === interaction.user.id && msg.guildId === guildId;
+  const collector = interaction.channel.createMessageCollector({ filter, time: 30000, max: 1 });
+  collector.on('collect', async (msg) => {
+    try {
+      let feedbackMsg = '';
+      if (msg.content.toLowerCase() === 'clear') {
+        set(config, configKey, null);
+        feedbackMsg = `✅ **${description}** channel cleared.`;
+      } else {
+        const mentionedChannel = msg.mentions.channels.first();
+        if (mentionedChannel && mentionedChannel.type === ChannelType.GuildText) {
+          set(config, configKey, mentionedChannel.id);
+          feedbackMsg = `✅ **${description}** set to ${mentionedChannel}.`;
+        } else {
+          await interaction.followUp({ content: '❌ Invalid input. Mention a text channel or type `clear`.', ephemeral: true });
+          await msg.delete().catch(console.error);
+          return collector.stop();
+        }
+      }
+      await saveConfig(guildId, config);
+      await interaction.followUp({ content: feedbackMsg, ephemeral: true });
+      await msg.delete().catch(console.error);
+    } catch (error) { console.error(`Error in setChannel collector for ${configKey}:`, error); await interaction.followUp({ content: 'Error setting channel.', ephemeral: true }); } finally { collector.stop(); }
+  });
+  collector.on('end', (c, r) => { if (r === 'time') interaction.followUp({ content: '⏰ Config cancelled (time out).', ephemeral: true }).catch(console.error); });
+}
+
+async function setNumericValue(interaction, config, guildId, configKey, description, options = {}) {
+  const { min = 0, max = Infinity, integer = false } = options;
+  await interaction.deferUpdate();
+  await interaction.followUp({
+    content: `Enter value for **${description}**.\n(Min: ${min}, Max: ${max === Infinity ? 'None' : max}${integer ? ', Whole numbers' : ''})`,
+    ephemeral: true, fetchReply: true
+  });
+  const filter = (msg) => msg.author.id === interaction.user.id && msg.guildId === guildId;
+  const collector = interaction.channel.createMessageCollector({ filter, time: 30000, max: 1 });
+  collector.on('collect', async (msg) => {
+    try {
+      const value = integer ? parseInt(msg.content, 10) : parseFloat(msg.content);
+      let feedbackMsg = '';
+      if (isNaN(value) || value < min || value > max || (integer && !Number.isInteger(value))) {
+        feedbackMsg = `❌ Invalid. Enter number between ${min}-${max === Infinity ? 'inf' : max}${integer ? ' (whole)' : ''}.`;
+      } else {
+        set(config, configKey, value);
+        await saveConfig(guildId, config);
+        feedbackMsg = `✅ **${description}** set to \`${value}\`.`;
+      }
+      await interaction.followUp({ content: feedbackMsg, ephemeral: true });
+      await msg.delete().catch(console.error);
+    } catch (error) { console.error(`Error in setNumericValue collector for ${configKey}:`, error); await interaction.followUp({ content: 'Error setting value.', ephemeral: true }); } finally { collector.stop(); }
+  });
+  collector.on('end', (c, r) => { if (r === 'time') interaction.followUp({ content: '⏰ Config cancelled (time out).', ephemeral: true }).catch(console.error); });
+}
+
+async function setRole(interaction, config, guildId, configKey, description) {
+  await interaction.deferUpdate();
+  await interaction.followUp({
+    content: `Mention the role for **${description}**, or type \`clear\` to unset.`,
+    ephemeral: true, fetchReply: true
+  });
+  const filter = (msg) => msg.author.id === interaction.user.id && msg.guildId === guildId;
+  const collector = interaction.channel.createMessageCollector({ filter, time: 30000, max: 1 });
+  collector.on('collect', async (msg) => {
+    try {
+      let feedbackMsg = '';
+      if (msg.content.toLowerCase() === 'clear') {
+        set(config, configKey, null);
+        feedbackMsg = `✅ **${description}** role cleared.`;
+      } else {
+        const mentionedRole = msg.mentions.roles.first();
+        if (mentionedRole) {
+          if (mentionedRole.id === guildId) { feedbackMsg = '❌ Cannot use @everyone.'; /* Stop */ }
+          else if (interaction.guild.members.me?.roles.highest.position <= mentionedRole.position) { feedbackMsg = `❌ Cannot manage ${mentionedRole} (role too high).`; /* Stop */ }
+          else {
+            set(config, configKey, mentionedRole.id);
+            feedbackMsg = `✅ **${description}** set to ${mentionedRole}.`;
+          }
+        } else { feedbackMsg = '❌ Invalid. Mention a role or type `clear`.'; /* Stop */ }
+
+        if (feedbackMsg.startsWith('❌')) {
+          await interaction.followUp({ content: feedbackMsg, ephemeral: true });
+          await msg.delete().catch(console.error);
+          return collector.stop();
+        }
+      }
+      await saveConfig(guildId, config);
+      await interaction.followUp({ content: feedbackMsg, ephemeral: true });
+      await msg.delete().catch(console.error);
+    } catch (error) { console.error(`Error in setRole collector for ${configKey}:`, error); await interaction.followUp({ content: 'Error setting role.', ephemeral: true }); } finally { collector.stop(); }
+  });
+  collector.on('end', (c, r) => { if (r === 'time') interaction.followUp({ content: '⏰ Config cancelled (time out).', ephemeral: true }).catch(console.error); });
+}
+
+async function addMilestone(interaction, config, guildId, systemType) {
+  await interaction.deferUpdate();
+  await interaction.followUp({
+    content: `Enter number for **${systemType} milestone** (e.g., 10):`,
+    ephemeral: true, fetchReply: true
+  });
+  const filterNumber = msg => msg.author.id === interaction.user.id && msg.guildId === guildId;
+  const numberCollector = interaction.channel.createMessageCollector({ filter: filterNumber, time: 30000, max: 1 });
+  numberCollector.on('collect', async numberMsg => {
+    try {
+      const milestoneNumber = parseInt(numberMsg.content, 10);
+      await numberMsg.delete().catch(console.error);
+      if (isNaN(milestoneNumber) || milestoneNumber <= 0) { await interaction.followUp({ content: '❌ Invalid number.', ephemeral: true }); return numberCollector.stop(); }
+      const configPath = systemType === 'streak' ? 'streakSystem' : 'levelSystem';
+      const roleNamePrefix = systemType === 'streak' ? `${milestoneNumber} Day Streak` : `Level ${milestoneNumber}`;
+      const configRoleKey = systemType === 'streak' ? `role${milestoneNumber}day` : `roleLevel${milestoneNumber}`;
+      if (config[configPath]?.[configRoleKey]) { await interaction.followUp({ content: `⚠️ Milestone for ${milestoneNumber} already exists. Remove it first.`, ephemeral: true }); return numberCollector.stop(); }
+
+      await interaction.followUp({ content: `Mention role for **${roleNamePrefix}**, type 'create', or 'cancel'.`, ephemeral: true, fetchReply: true });
+      const filterRole = msg => msg.author.id === interaction.user.id && msg.guildId === guildId;
+      const roleCollector = interaction.channel.createMessageCollector({ filter: filterRole, time: 45000, max: 1 });
+      roleCollector.on('collect', async roleMsg => {
+        try {
+          let targetRole = null, feedbackMsg = '', roleContentLower = roleMsg.content.toLowerCase();
+          if (roleContentLower === 'cancel') { feedbackMsg = 'Cancelled.'; }
+          else if (roleContentLower === 'create') {
+            try { targetRole = await interaction.guild.roles.create({ name: roleNamePrefix, reason: `Milestone role` }); feedbackMsg = `✅ Created & set ${targetRole}.`; }
+            catch (e) { feedbackMsg = `❌ Failed to create role: ${e.message}`; }
+          } else {
+            targetRole = roleMsg.mentions.roles.first();
+            if (!targetRole) { feedbackMsg = '❌ No valid role mentioned.'; }
+            else if (targetRole.id === guildId) { feedbackMsg = '❌ Cannot use @everyone.'; targetRole = null; }
+            else if (interaction.guild.members.me?.roles.highest.position <= targetRole.position) { feedbackMsg = `❌ Cannot manage ${targetRole} (role too high).`; targetRole = null; }
+            else { feedbackMsg = `✅ Role ${targetRole} selected.`; }
+          }
+          if (targetRole) { set(config, `${configPath}.${configRoleKey}`, targetRole.id); await saveConfig(guildId, config); }
+          await interaction.followUp({ content: feedbackMsg, ephemeral: true });
+          await roleMsg.delete().catch(console.error);
+        } catch (e) { console.error("Err adding milestone role:", e); await interaction.followUp({ content: 'Error setting role.', ephemeral: true }); } finally { roleCollector.stop(); }
+      });
+      roleCollector.on('end', (c, r) => { if (r === 'time') interaction.followUp({ content: '⏰ Role selection timed out.', ephemeral: true }).catch(console.error); });
+    } catch (e) { console.error("Err adding milestone num:", e); await interaction.followUp({ content: 'Error processing number.', ephemeral: true }); } finally { numberCollector.stop(); }
+  });
+  numberCollector.on('end', (c, r) => { if (r === 'time') interaction.followUp({ content: '⏰ Number input timed out.', ephemeral: true }).catch(console.error); });
+}
+
+async function removeMilestone(interaction, config, guildId, systemType) {
+  await interaction.deferUpdate();
+  const configPath = systemType === 'streak' ? 'streakSystem' : 'levelSystem';
+  const milestones = Object.entries(config[configPath] ?? {})
+      .map(([key, roleId]) => {
+        const match = key.match(/\d+$/); if (!match || !roleId) return null;
+        const number = parseInt(match[0], 10); const roleName = interaction.guild.roles.cache.get(roleId)?.name || 'Deleted Role';
+        return { number, roleId, roleName, key };
+      }).filter(m => m !== null).sort((a, b) => a.number - b.number);
+  if (milestones.length === 0) { return interaction.followUp({ content: `No ${systemType} milestones to remove.`, ephemeral: true }); }
+  const options = milestones.map(m => ({ label: `${systemType==='streak'?m.number+' Days': 'Level '+m.number}`, description: `Role: @${m.roleName}`, value: m.key }));
+  const selectMenu = new StringSelectMenuBuilder().setCustomId(`remove_${systemType}_milestone_select_${interaction.id}`).setPlaceholder(`Select ${systemType} milestone to remove`).addOptions(options.slice(0, 25));
+  const row = new ActionRowBuilder().addComponents(selectMenu);
+  const removalPrompt = await interaction.followUp({ content: `Select **${systemType} milestone** to remove:`, components: [row], ephemeral: true, fetchReply: true });
+  const filter = i => i.customId === `remove_${systemType}_milestone_select_${interaction.id}` && i.user.id === interaction.user.id;
+  const collector = removalPrompt.createMessageComponentCollector({ filter, time: 30000, max: 1 });
+  collector.on('collect', async i => {
+    try {
+      await i.deferUpdate(); const selectedKey = i.values[0];
+      const milestoneToRemove = milestones.find(m => m.key === selectedKey);
+      if (!milestoneToRemove) { await interaction.editReply({ content: 'Invalid selection.', components: [] }); return; }
+      if (config[configPath]?.[selectedKey]) {
+        delete config[configPath][selectedKey]; await saveConfig(guildId, config);
+        await interaction.editReply({ content: `✅ Removed ${milestoneToRemove.number} ${systemType==='streak'?'day':'level'} milestone (Role: @${milestoneToRemove.roleName}). Role **not** deleted.`, components: [] });
+      } else { await interaction.editReply({ content: 'Milestone not found in config.', components: [] }); }
+    } catch (e) { console.error(`Err removing milestone ${i.values[0]}:`, e); await interaction.editReply({ content: 'Error removing milestone.', components: [] }); } finally { collector.stop(); }
+  });
+  collector.on('end', (c, r) => { if (r === 'time') interaction.editReply({ content: '⏰ Removal cancelled (time out).', components: [] }).catch(console.error); });
 }
