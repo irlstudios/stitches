@@ -15,8 +15,8 @@ const AWS_REGION = process.env.AWS_REGION || "us-east-1";
 const ATTRIBUTE_INDEX_NAME = "attributeName-count-index";
 
 let credentialsProvider;
-const personalKeyId = process.env.PERSONAL_AWS_ACCESS_KEY_ID;
-const personalSecretKey = process.env.PERSONAL_AWS_SECRET_ACCESS_KEY;
+//const personalKeyId = process.env.PERSONAL_AWS_ACCESS_KEY_ID;
+//const personalSecretKey = process.env.PERSONAL_AWS_SECRET_ACCESS_KEY;
 
 if (personalKeyId && personalSecretKey) {
   credentialsProvider = async () => {
