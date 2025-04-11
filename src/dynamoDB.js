@@ -272,7 +272,7 @@ async function queryLeaderboard(attributeName, guildId, limit = 10) {
         ':gidVal': String(guildId)
       },
       ScanIndexForward: false,
-      Limit: Math.max(1, Math.min(limit, 100))
+      Limit: 10
     };
     const { Items } = await ddbDocClient.send(new QueryCommand(params));
     return Items || [];
