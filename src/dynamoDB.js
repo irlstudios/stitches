@@ -226,13 +226,14 @@ async function updateUserData(guildId, userId, updates) {
   }
   const updateKeys = Object.keys(updates);
   if (updateKeys.length === 0) {
-    console.warn(`[DynamoDB] updateUserData called for ${userId} with empty updates object. Skipping.`);
+    console.warn(`[DynamoDB Update] updateUserData called for ${userId} with empty updates object. Skipping.`);
     return;
   }
 
   const primaryUserId = String(userId);
   const primaryGuildId = String(guildId);
   const now = new Date().toISOString();
+  console.log(`[DynamoDB Update] Starting update for User: ${primaryUserId}, Guild: ${primaryGuildId}. Keys: [${updateKeys.join(', ')}]`);
 
   let primaryUpdateExpression = "SET ";
   const primaryExpressionAttributeNames = { '#ud': 'userData', '#lu': 'lastUpdated' };
@@ -254,7 +255,7 @@ async function updateUserData(guildId, userId, updates) {
     }
 
     if (value === undefined) {
-      console.warn(`[DynamoDB UpdateSanitize] Attempted to set undefined value for key '${key}' for user ${primaryUserId}. Skipping this field.`);
+      console.warn(`[DynamoDB UpdateSanitize] User: ${primaryUserId} - Attempted to set undefined value for key '${key}'. Skipping this field.`);
       continue;
     }
 
@@ -264,7 +265,7 @@ async function updateUserData(guildId, userId, updates) {
   }
 
   if (primaryUpdateParts.length === 0) {
-    console.warn(`[DynamoDB UpdateSanitize] No valid update parts remained after sanitizing for user ${primaryUserId}. Only updating lastUpdated.`);
+    console.warn(`[DynamoDB UpdateSanitize] User: ${primaryUserId} - No valid update parts remained after sanitizing. Only updating lastUpdated.`);
   }
 
   primaryUpdateParts.push(`#lu = :lu`);
@@ -280,6 +281,7 @@ async function updateUserData(guildId, userId, updates) {
   };
 
   const attributePutPromises = [];
+  const attributeDetails = [];
   for (const key of updateKeys) {
     let attrName = key;
     let countValue = updates[key];
@@ -291,34 +293,77 @@ async function updateUserData(guildId, userId, updates) {
     if (LEADERBOARD_ATTRIBUTES.includes(attrName)) {
       const attributeItem = createAttributeItem(primaryGuildId, primaryUserId, attrName, countValue);
       if (attributeItem) {
+        attributeDetails.push({ id: attributeItem.DiscordId, name: attrName });
         attributePutPromises.push(
-            ddbDocClient.send(new PutCommand({ TableName: TABLE_NAME, Item: attributeItem })).catch(error => {
-              console.error(`[DynamoDB] Error putting attribute ${attrName} during updateUserData for ${primaryUserId}:`, error);
-              return { success: false, id: `${primaryUserId}-${attrName}`, error: error };
-            })
+            ddbDocClient.send(new PutCommand({ TableName: TABLE_NAME, Item: attributeItem }))
+                .then(() => ({ success: true, id: attributeItem.DiscordId, name: attrName }))
+                .catch(error => {
+                  console.error(`[DynamoDB Update] Error putting attribute item ${attributeItem.DiscordId} during updateUserData for ${primaryUserId}:`, error);
+                  return { success: false, id: attributeItem.DiscordId, name: attrName, error: error };
+                })
         );
+      } else {
+        console.log(`[DynamoDB Update] User: ${primaryUserId} - Skipped creating attribute item for '${attrName}' (value: ${countValue})`);
+        attributeDetails.push({ id: `${primaryUserId}-${attrName}`, name: attrName, skipped: true });
       }
     }
   }
 
+  let primaryUpdateSuccess = false;
+  let primaryUpdateError = null;
   try {
+    console.log(`[DynamoDB Update] User: ${primaryUserId} - Attempting primary UpdateItem.`);
     await ddbDocClient.send(new UpdateCommand(primaryUpdateParams));
-    if (attributePutPromises.length > 0) {
-      const results = await Promise.all(attributePutPromises);
-      const failedPuts = results.filter(r => r && r.success === false);
-      if (failedPuts.length > 0) {
-        console.warn(`[DynamoDB] ${failedPuts.length}/${attributePutPromises.length} attribute puts failed during updateUserData for ${primaryUserId}. Failed IDs: ${failedPuts.map(f=>f.id).join(', ')}`);
-      }
-    }
+    primaryUpdateSuccess = true;
+    console.log(`[DynamoDB Update] User: ${primaryUserId} - Primary UpdateItem successful.`);
   } catch (error) {
-    console.error(`[DynamoDB] Error updating user data for userId ${primaryUserId}:`, error);
+    primaryUpdateError = error;
+    console.error(`[DynamoDB Update] User: ${primaryUserId} - Error during primary UpdateItem:`, error);
     if (error.name === 'ValidationException') {
       console.error("[DynamoDB Validation Debug] Expression:", primaryUpdateParams.UpdateExpression);
       console.error("[DynamoDB Validation Debug] Names:", JSON.stringify(primaryUpdateParams.ExpressionAttributeNames));
       console.error("[DynamoDB Validation Debug] Values:", JSON.stringify(primaryUpdateParams.ExpressionAttributeValues));
     }
-    throw error;
+
   }
+
+  let attributePutResults = [];
+  if (attributePutPromises.length > 0) {
+    console.log(`[DynamoDB Update] User: ${primaryUserId} - Waiting for ${attributePutPromises.length} attribute PutItem operations.`);
+    attributePutResults = await Promise.all(attributePutPromises);
+    console.log(`[DynamoDB Update] User: ${primaryUserId} - Finished attribute PutItem operations.`);
+  } else {
+    console.log(`[DynamoDB Update] User: ${primaryUserId} - No attribute PutItem operations were needed/generated.`);
+  }
+
+  const failedAttributePuts = attributePutResults.filter(r => r && r.success === false);
+  const successfulAttributePuts = attributePutResults.filter(r => r && r.success === true);
+  const skippedAttributePuts = attributeDetails.filter(d => d.skipped === true);
+
+  if (failedAttributePuts.length > 0) {
+    console.warn(`[DynamoDB Update] User: ${primaryUserId} - ${failedAttributePuts.length}/${attributeDetails.length} attribute puts failed. Failed attributes: [${failedAttributePuts.map(f=>f.name).join(', ')}]`);
+  }
+  if (successfulAttributePuts.length > 0) {
+    console.log(`[DynamoDB Update] User: ${primaryUserId} - ${successfulAttributePuts.length}/${attributeDetails.length} attribute puts successful. Successful attributes: [${successfulAttributePuts.map(f=>f.name).join(', ')}]`);
+  }
+  if (skippedAttributePuts.length > 0) {
+    console.log(`[DynamoDB Update] User: ${primaryUserId} - ${skippedAttributePuts.length}/${attributeDetails.length} attribute puts skipped (invalid data). Skipped attributes: [${skippedAttributePuts.map(f=>f.name).join(', ')}]`);
+  }
+
+
+  if (!primaryUpdateSuccess) {
+    console.error(`[DynamoDB Update] User: ${primaryUserId} - Update failed due to primary UpdateItem error. Throwing error.`);
+
+    throw primaryUpdateError || new Error("Primary UpdateItem failed for unknown reason.");
+  }
+
+  if (failedAttributePuts.length > 0) {
+    console.warn(`[DynamoDB Update] User: ${primaryUserId} - Update completed, but ${failedAttributePuts.length} attribute updates failed. Check logs for details.`);
+
+  }
+
+  console.log(`[DynamoDB Update] Finished update for User: ${primaryUserId}, Guild: ${primaryGuildId}. Primary Success: ${primaryUpdateSuccess}. Attribute Success: ${successfulAttributePuts.length}/${attributeDetails.length}.`);
+
 }
 
 async function listUserData(guildId) {
