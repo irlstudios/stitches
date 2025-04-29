@@ -6,7 +6,8 @@ const {
   PutCommand,
   ScanCommand,
   UpdateCommand,
-  QueryCommand
+  QueryCommand,
+  BatchWriteCommand
 } = require("@aws-sdk/lib-dynamodb");
 const { defaultProvider } = require("@aws-sdk/credential-provider-node");
 
@@ -481,6 +482,136 @@ async function queryLeaderboard(attributeName, guildId, limit = 10) {
   }
 }
 
+async function batchResetMessageAttributes(guildId, userIds) {
+  if (!guildId || !Array.isArray(userIds) || userIds.length === 0) {
+    console.error("[DynamoDB Batch] batchResetMessageAttributes missing guildId or invalid/empty userIds array.");
+    return { success: false, processedCount: 0, successCount: 0, failCount: 0, unprocessedItems: userIds.length };
+  }
+
+  const primaryGuildId = String(guildId);
+  const attributeName = 'messages';
+  const resetValue = 0;
+  const now = new Date().toISOString();
+  const BATCH_SIZE = 25;
+  let writeRequests = [];
+  let totalProcessed = 0;
+  let totalSuccess = 0;
+  let totalFailed = 0;
+  let totalUnprocessedInitially = 0;
+
+  for (const userId of userIds) {
+    const primaryUserId = String(userId);
+    const item = {
+      DiscordId: `${primaryUserId}-${attributeName}`,
+      attributeName: attributeName,
+      count: resetValue,
+      discordAccountId: primaryUserId,
+      guildId: primaryGuildId,
+      lastUpdated: now
+    };
+    if (EXPIRING_ATTRIBUTES.includes(attributeName)) {
+      item.expireAt = getNextMidnightTimestamp();
+    }
+    writeRequests.push({ PutRequest: { Item: item } });
+  }
+
+  console.log(`[DynamoDB Batch] Prepared ${writeRequests.length} PutRequests for attribute '${attributeName}' reset in guild ${primaryGuildId}.`);
+
+  for (let i = 0; i < writeRequests.length; i += BATCH_SIZE) {
+    const batch = writeRequests.slice(i, i + BATCH_SIZE);
+    const params = { RequestItems: { [TABLE_NAME]: batch } };
+    let attempt = 0;
+    const MAX_ATTEMPTS = 5;
+    let unprocessedItems = batch; // Start with the full batch for the first attempt
+
+    while (unprocessedItems.length > 0 && attempt < MAX_ATTEMPTS) {
+      attempt++;
+      const currentBatchSize = unprocessedItems.length;
+      totalProcessed += currentBatchSize; // Count attempts on items
+      params.RequestItems[TABLE_NAME] = unprocessedItems;
+      console.log(`[DynamoDB Batch] Guild ${primaryGuildId} - Attempt ${attempt}/${MAX_ATTEMPTS}: Sending BatchWriteCommand with ${currentBatchSize} items (Attribute: ${attributeName}).`);
+
+      try {
+        const result = await ddbDocClient.send(new BatchWriteCommand(params));
+        if (result.UnprocessedItems && result.UnprocessedItems[TABLE_NAME] && result.UnprocessedItems[TABLE_NAME].length > 0) {
+          unprocessedItems = result.UnprocessedItems[TABLE_NAME];
+          totalUnprocessedInitially += unprocessedItems.length; // Count items returned as unprocessed
+          console.warn(`[DynamoDB Batch] Guild ${primaryGuildId} - Attempt ${attempt}: Received ${unprocessedItems.length} unprocessed items for attribute '${attributeName}'. Retrying.`);
+          await new Promise(resolve => setTimeout(resolve, 200 * Math.pow(2, attempt))); // Exponential backoff
+        } else {
+          console.log(`[DynamoDB Batch] Guild ${primaryGuildId} - Attempt ${attempt}: Batch processed successfully (Attribute: ${attributeName}).`);
+          totalSuccess += currentBatchSize; // Mark success for the items in this attempt
+          unprocessedItems = []; // Exit loop
+        }
+      } catch (error) {
+        console.error(`[DynamoDB Batch] Guild ${primaryGuildId} - Attempt ${attempt}: Error during BatchWriteCommand for attribute '${attributeName}':`, error);
+
+        totalFailed += currentBatchSize; // Assume all items in this failed attempt are failures
+        unprocessedItems = []; // Exit loop on hard error
+        // Re-throw might be desired depending on how critical perfect completion is
+        // throw error;
+      }
+    }
+
+    // If items remain unprocessed after max attempts
+    if (unprocessedItems.length > 0) {
+      console.error(`[DynamoDB Batch] Guild ${primaryGuildId} - CRITICAL: Failed to process ${unprocessedItems.length} items for attribute '${attributeName}' after ${MAX_ATTEMPTS} attempts. Logging unprocessed items.`);
+      // unprocessedItems contains the raw request objects, extract IDs if needed for logging
+      const failedIds = unprocessedItems.map(req => req.PutRequest?.Item?.DiscordId).filter(id => id);
+      console.error(`[DynamoDB Batch] Guild ${primaryGuildId} - Failed Item DiscordIds (Attribute: ${attributeName}): [${failedIds.join(', ')}]`);
+      totalFailed += unprocessedItems.length; // Add finally unprocessed to failed count
+    }
+  }
+
+  // Adjust success count based on final failures
+  totalSuccess = userIds.length - totalFailed;
+
+
+  console.log(`[DynamoDB Batch] Finished batch reset for attribute '${attributeName}' in guild ${primaryGuildId}. Total Users: ${userIds.length}, Succeeded: ${totalSuccess}, Failed: ${totalFailed}.`);
+  return { success: totalFailed === 0, processedCount: userIds.length, successCount: totalSuccess, failCount: totalFailed, unprocessedItems: totalFailed };
+}
+
+async function updatePrimaryUserMessages(guildId, userId, messageCount) {
+  if (!userId || !guildId || typeof messageCount !== 'number') {
+    console.error("[DynamoDB PrimaryUpdate] updatePrimaryUserMessages missing required arguments or invalid messageCount type.", { userId: !!userId, guildId: !!guildId, messageCountType: typeof messageCount });
+    throw new Error("updatePrimaryUserMessages missing required arguments or invalid messageCount.");
+  }
+  const primaryUserId = String(userId);
+  const primaryGuildId = String(guildId);
+  const now = new Date().toISOString();
+  console.log(`[DynamoDB PrimaryUpdate] Starting update for User: ${primaryUserId}, Guild: ${primaryGuildId}. Setting messages to ${messageCount}.`);
+
+  const params = {
+    TableName: TABLE_NAME,
+    Key: { DiscordId: primaryUserId },
+    UpdateExpression: "SET #ud.#msg = :msgVal, #lu = :luVal",
+    ExpressionAttributeNames: {
+      "#ud": "userData",
+      "#msg": "messages",
+      "#lu": "lastUpdated"
+    },
+    ExpressionAttributeValues: {
+      ":msgVal": messageCount,
+      ":luVal": now
+    },
+    ReturnValues: "NONE"
+  };
+
+  try {
+    await ddbDocClient.send(new UpdateCommand(params));
+    console.log(`[DynamoDB PrimaryUpdate] Successfully updated primary messages for User: ${primaryUserId}, Guild: ${primaryGuildId}.`);
+    return { success: true };
+  } catch (error) {
+    console.error(`[DynamoDB PrimaryUpdate] Error updating primary messages for User: ${primaryUserId}, Guild: ${primaryGuildId}:`, error);
+    if (error.name === 'ValidationException') {
+      console.error("[DynamoDB Validation Debug] PrimaryUpdate Params:", JSON.stringify(params));
+    }
+    // Do not throw here, allow Promise.all in caller to handle
+    return { success: false, error: error };
+  }
+}
+
+
 module.exports = {
   getUserData,
   getRawUserData,
@@ -489,5 +620,7 @@ module.exports = {
   listUserData,
   incrementMessageLeaderWins,
   queryLeaderboard,
-  safeParseNumber
+  safeParseNumber,
+  batchResetMessageAttributes,
+  updatePrimaryUserMessages
 };
