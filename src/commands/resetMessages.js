@@ -1,5 +1,33 @@
 const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
-const { getUserData, updateUserData, listUserData, batchResetMessageAttributes, updatePrimaryUserMessages } = require('../dynamoDB'); // Added batchResetMessageAttributes and updatePrimaryUserMessages
+const { getUserData, updateUserData, listUserData, batchResetMessageAttributes, updatePrimaryUserMessages } = require('../dynamoDB');
+
+async function processInChunks(items, chunkSize, asyncOperation) {
+  let results = [];
+  console.log(`[Chunk Processor] Starting processing of ${items.length} items in chunks of ${chunkSize}.`);
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const chunk = items.slice(i, i + chunkSize);
+    const chunkNumber = Math.floor(i / chunkSize) + 1;
+    const totalChunks = Math.ceil(items.length / chunkSize);
+    console.log(`[Chunk Processor] Processing chunk ${chunkNumber}/${totalChunks} (Size: ${chunk.length}).`);
+    const chunkStartTime = Date.now();
+    try {
+      const chunkPromises = chunk.map(item => asyncOperation(item));
+      const chunkResults = await Promise.all(chunkPromises);
+      results = results.concat(chunkResults);
+      const chunkEndTime = Date.now();
+      console.log(`[Chunk Processor] Finished chunk ${chunkNumber}/${totalChunks}. Duration: ${chunkEndTime - chunkStartTime}ms.`);
+    } catch (error) {
+      console.error(`[Chunk Processor] CRITICAL Error processing chunk ${chunkNumber}/${totalChunks}:`, error);
+
+      const failedResults = chunk.map(item => ({ success: false, item: item, error: new Error("Chunk processing failed") }));
+      results = results.concat(failedResults);
+    }
+
+  }
+  console.log(`[Chunk Processor] Finished processing all chunks.`);
+  return results;
+}
+
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -62,18 +90,19 @@ module.exports = {
         try {
 
           await updateUserData(guildId, targetUserId, resetFields);
-          console.log(`[ResetMessages][${commandId}] Successfully updated user data (primary & attribute) via updateUserData for User ID: ${targetUserId}, Guild ID: ${guildId}`);
+          console.log(`[ResetMessages][${commandId}] updateUserData call completed for User ID: ${targetUserId}, Guild ID: ${guildId}. Check previous logs for success/failure details.`);
+          const successMsg = `✅ Weekly message count for ${targetUser.username} (${targetUserId}) has been reset. Check leaderboard shortly.`;
+          console.log(`[ResetMessages][${commandId}] Sending success reply for User ID: ${targetUserId}, Guild ID: ${guildId}. Message: "${successMsg}"`);
+          await interaction.editReply({ content: successMsg });
+
         } catch (updateError) {
-          console.error(`[ResetMessages][${commandId}] Failed to update user data via updateUserData for User ID: ${targetUserId}, Guild ID: ${guildId}:`, updateError);
+          console.error(`[ResetMessages][${commandId}] updateUserData call failed for User ID: ${targetUserId}, Guild ID: ${guildId}:`, updateError);
 
           throw updateError;
         }
 
-        const successMsg = `✅ Weekly message count for ${targetUser.username} (${targetUserId}) has been reset to 0.`;
-        console.log(`[ResetMessages][${commandId}] Sending success reply for User ID: ${targetUserId}, Guild ID: ${guildId}. Message: "${successMsg}"`);
-        await interaction.editReply({ content: successMsg });
-
       } else if (subcommand === 'server') {
+        const serverResetStartTime = Date.now();
         console.log(`[ResetMessages][${commandId}] Server subcommand selected for Guild ID: ${guildId}`);
 
         console.log(`[ResetMessages][${commandId}] Attempting to list all user data using listUserData for Guild ID: ${guildId}`);
@@ -91,10 +120,10 @@ module.exports = {
 
         if (!users || users.length === 0) {
           console.log(`[ResetMessages][${commandId}] No users returned by listUserData for Guild ID: ${guildId}. No reset needed.`);
-          return interaction.editReply({ content: 'No users found with data in this server (according to listUserData). No reset needed.' });
+          return interaction.editReply({ content: 'No users found with data in this server. No reset needed.' });
         }
 
-        const userIdsToReset = users.map(user => user.userId).filter(id => id); // Extract valid user IDs
+        const userIdsToReset = users.map(user => user.userId).filter(id => id);
         const totalUsersAttempted = userIdsToReset.length;
         console.log(`[ResetMessages][${commandId}] Extracted ${totalUsersAttempted} valid user IDs from ${users.length} records in Guild ID: ${guildId}. Starting server-wide reset...`);
 
@@ -103,81 +132,83 @@ module.exports = {
           return interaction.editReply({ content: 'No users with valid IDs found in the data. No reset performed.' });
         }
 
-        // --- Step 1: Batch Reset GSI Attribute Items ---
+
         console.log(`[ResetMessages][${commandId}] Step 1: Starting batch reset for 'messages' attribute items for ${totalUsersAttempted} users in Guild ID: ${guildId}.`);
-        let batchResult = { success: false, successCount: 0, failCount: totalUsersAttempted }; // Default to failure
+        let batchResult = { success: false, successCount: 0, failCount: totalUsersAttempted };
         try {
           batchResult = await batchResetMessageAttributes(guildId, userIdsToReset);
-          console.log(`[ResetMessages][${commandId}] Step 1: Batch reset for attribute items completed for Guild ID: ${guildId}. Success: ${batchResult.success}, Succeeded: ${batchResult.successCount}, Failed: ${batchResult.failCount}.`);
+          console.log(`[ResetMessages][${commandId}] Step 1: Batch reset for attribute items completed for Guild ID: ${guildId}. Overall Success: ${batchResult.success}, Succeeded: ${batchResult.successCount}, Failed: ${batchResult.failCount}.`);
         } catch (batchError) {
           console.error(`[ResetMessages][${commandId}] Step 1: CRITICAL Error during batchResetMessageAttributes for Guild ID: ${guildId}:`, batchError);
 
-          throw batchError; // Halt execution if the batch function itself throws catastrophically
+          throw batchError;
         }
 
-        // --- Step 2: Update Primary User Records Individually ---
-        console.log(`[ResetMessages][${commandId}] Step 2: Starting individual updates for primary user records (userData.messages) for ${totalUsersAttempted} users in Guild ID: ${guildId}.`);
-        let primaryUpdateSuccessCount = 0;
-        let primaryUpdateFailCount = 0;
-        const primaryUpdatePromises = [];
 
-        for (const userId of userIdsToReset) {
-          console.log(`[ResetMessages][${commandId}] Preparing primary update promise for User ID: ${userId} in Guild ID: ${guildId}`);
-          const promise = updatePrimaryUserMessages(guildId, userId, resetValue)
-              .then(result => {
-                if(result.success) {
-                  console.log(`[ResetMessages][${commandId}] Successfully updated primary messages for User ID: ${userId} in Guild ID: ${guildId}`);
-                  primaryUpdateSuccessCount++;
-                } else {
-                  console.error(`[ResetMessages][${commandId}] Failed to update primary messages for User ID: ${userId} in Guild ID: ${guildId}:`, result.error);
-                  primaryUpdateFailCount++;
-                }
-              })
-              .catch(err => {
-                // This catch is primarily for unexpected errors from the promise creation/setup itself
-                console.error(`[ResetMessages][${commandId}] Unexpected error setting up/awaiting primary update for User ID: ${userId} in Guild ID: ${guildId}:`, err);
-                primaryUpdateFailCount++;
-              });
-          primaryUpdatePromises.push(promise);
+        console.log(`[ResetMessages][${commandId}] Step 2: Starting chunked individual updates for primary user records (userData.messages) for ${totalUsersAttempted} users in Guild ID: ${guildId}.`);
+        const PRIMARY_UPDATE_CHUNK_SIZE = 20;
+        let primaryUpdateResults = [];
+        try {
+          primaryUpdateResults = await processInChunks(userIdsToReset, PRIMARY_UPDATE_CHUNK_SIZE, async (userId) => {
+
+            console.log(`[ResetMessages][${commandId}][ChunkWorker] Updating primary messages for User ID: ${userId}...`);
+            return await updatePrimaryUserMessages(guildId, userId, resetValue);
+          });
+        } catch (chunkError) {
+          console.error(`[ResetMessages][${commandId}] Step 2: CRITICAL Error during chunk processing for primary updates in Guild ID: ${guildId}:`, chunkError);
+
         }
 
-        console.log(`[ResetMessages][${commandId}] Waiting for all ${primaryUpdatePromises.length} primary user update promises to settle for Guild ID: ${guildId}.`);
-        await Promise.all(primaryUpdatePromises);
-        console.log(`[ResetMessages][${commandId}] Finished processing all primary user updates for Guild ID: ${guildId}. Final primary counts - Success: ${primaryUpdateSuccessCount}, Failed: ${primaryUpdateFailCount}.`);
+        const primaryUpdateSuccessCount = primaryUpdateResults.filter(r => r.success).length;
+        const primaryUpdateFailCount = primaryUpdateResults.filter(r => !r.success).length;
+        console.log(`[ResetMessages][${commandId}] Finished processing all primary user update chunks for Guild ID: ${guildId}. Final primary counts - Success: ${primaryUpdateSuccessCount}, Failed: ${primaryUpdateFailCount}. Total results received: ${primaryUpdateResults.length}`);
 
 
-        // --- Final Report ---
-        const overallSuccess = batchResult.success && primaryUpdateFailCount === 0; // Consider overall success only if batch worked AND all primary updates worked
-        let finalMsg = `✅ Server reset complete for Guild ID: ${guildId}.`;
+        if (primaryUpdateResults.length !== totalUsersAttempted) {
+          console.warn(`[ResetMessages][${commandId}] Discrepancy detected! Number of primary update results (${primaryUpdateResults.length}) does not match total users attempted (${totalUsersAttempted}). Failures might be undercounted.`);
+
+        }
+
+
+
+        const serverResetEndTime = Date.now();
+        const overallSuccess = batchResult.success && primaryUpdateFailCount === 0;
+        let finalMsg = `✅ Server reset command finished processing for Guild ID: ${guildId}.`;
         if (!overallSuccess) {
-          finalMsg = `⚠️ Server reset partially completed for Guild ID: ${guildId}.`;
+          finalMsg = `⚠️ Server reset command finished with potential issues for Guild ID: ${guildId}.`;
         }
 
+        finalMsg += `\nDuration: ${((serverResetEndTime - serverResetStartTime) / 1000).toFixed(2)} seconds.`;
         finalMsg += `\nAttempted resets for ${totalUsersAttempted} users found.`;
         finalMsg += `\nLeaderboard Attribute Updates: ${batchResult.successCount} succeeded, ${batchResult.failCount} failed.`;
         finalMsg += `\nPrimary Record Updates: ${primaryUpdateSuccessCount} succeeded, ${primaryUpdateFailCount} failed.`;
 
         if (!overallSuccess) {
-          finalMsg += `\nPlease check the bot logs (Interaction ID: ${commandId}) for details on failures. Leaderboard might be inconsistent.`;
+          finalMsg += `\nPlease check the bot logs (Interaction ID: ${commandId}) for details on failures. Leaderboard or user data might be inconsistent.`;
+        } else {
+          finalMsg += `\nLeaderboard should update shortly reflecting the reset.`;
         }
 
         console.log(`[ResetMessages][${commandId}] Sending final reply for server reset in Guild ID: ${guildId}. Message: "${finalMsg}"`);
         await interaction.editReply({ content: finalMsg });
-        console.log(`[ResetMessages][${commandId}] Finished server reset command execution for Guild ID: ${guildId}. Overall Success: ${overallSuccess}`);
+        console.log(`[ResetMessages][${commandId}] Finished server reset command execution for Guild ID: ${guildId}. Overall Success: ${overallSuccess}. Duration: ${serverResetEndTime - serverResetStartTime}ms`);
       }
 
     } catch (error) {
 
       console.error(`[ResetMessages][${commandId}] CRITICAL ERROR during execution of subcommand '${subcommand}' in Guild ID: ${guildId} by User ID: ${invokingUserId}:`, error);
-      const errorMsg = `An error occurred while executing the '${subcommand}' reset. Please check the bot logs for details (Interaction ID: ${commandId}).`;
+      const errorMsg = `An error occurred while executing the '${subcommand}' reset. The operation likely failed. Please check the bot logs for details (Interaction ID: ${commandId}).`;
       try {
-        if (interaction.deferred || interaction.replied) {
-          console.log(`[ResetMessages][${commandId}] Attempting to edit reply with error message for Guild ID: ${guildId}.`);
-          await interaction.editReply({ content: errorMsg });
-        } else {
 
-          console.log(`[ResetMessages][${commandId}] Attempting to send initial reply with error message for Guild ID: ${guildId}.`);
+        if (interaction.channel && interaction.replied !== true) {
+          console.log(`[ResetMessages][${commandId}] Interaction was not replied, attempting initial reply with error message.`);
           await interaction.reply({ content: errorMsg, ephemeral: true });
+        } else if (interaction.editable) {
+          console.log(`[ResetMessages][${commandId}] Attempting to edit reply with error message.`);
+          await interaction.editReply({ content: errorMsg, components: [], embeds: [] });
+        } else {
+          console.log(`[ResetMessages][${commandId}] Could not edit reply or reply initially, attempting followup.`);
+          await interaction.followUp({ content: errorMsg, ephemeral: true });
         }
         console.log(`[ResetMessages][${commandId}] Error message sent to user for Guild ID: ${guildId}.`);
       } catch (replyError) {
