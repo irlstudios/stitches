@@ -32,8 +32,7 @@ if (personalKeyId && personalSecretKey) {
 let ddbClient;
 try {
   ddbClient = new DynamoDBClient({ region: AWS_REGION, credentials: credentialsProvider });
-} catch (clientInitError) {
-  console.error(clientInitError);
+} catch (e) {
   process.exit(1);
 }
 
@@ -71,8 +70,8 @@ function safeParseNumber(value, defaultValue = 0) {
 }
 
 function createAttributeItem(guildId, userId, attributeName, rawCount) {
-  const count = safeParseNumber(rawCount, null);
-  if (count === null || typeof count !== 'number') return null;
+  const count = safeParseNumber(rawCount, 0);
+  if (typeof count !== 'number') return null;
   const now = new Date().toISOString();
   const primaryUserId = String(userId);
   const primaryGuildId = String(guildId);
@@ -97,50 +96,44 @@ async function getRawUserData(userId) {
   try {
     const result = await ddbDocClient.send(new GetCommand(params));
     return result.Item || null;
-  } catch (error) {
-    console.error(error);
+  } catch {
     return null;
   }
 }
 
 async function getUserData(guildId, userId) {
   const rawItem = await getRawUserData(userId);
-  if (!rawItem || typeof rawItem.userData !== 'object') return null;
-  const ud = rawItem.userData;
-  const wrapperKeys = ['S','N','BOOL','L','M','NULL'];
-  const needsMigration = Object.values(ud).some(v => v && typeof v === 'object' && Object.keys(v).some(k => wrapperKeys.includes(k)));
-  let userDataObj;
-  if (needsMigration) {
-    try {
-      userDataObj = unmarshall(ud);
-    } catch (err) {
-      console.error(err);
-      return null;
-    }
-  } else {
-    userDataObj = ud;
+  if (!rawItem) return null;
+  if (typeof rawItem.userData === 'object' && rawItem.userData !== null) {
+    return rawItem.userData;
   }
-  return userDataObj;
+  if (rawItem.attributeName) return null;
+  try {
+    const unmarshalled = unmarshall(rawItem);
+    const userDataObj = unmarshalled.userData || unmarshalled;
+    await saveUserData(guildId, userId, userDataObj);
+    return userDataObj;
+  } catch {
+    return null;
+  }
 }
 
 async function saveUserData(guildId, userId, userData) {
   if (!userId || !guildId || !userData) throw new Error("saveUserData missing required arguments.");
+  console.log(`[DynamoDB Save] userData keys: ${Object.keys(userData).join(',')}`);
+  console.log(`[DynamoDB Save] experience object: ${JSON.stringify(userData.experience)}`);
   const now = new Date().toISOString();
   const primaryUserId = String(userId);
   const primaryGuildId = String(guildId);
   const primaryItem = { DiscordId: primaryUserId, guildId: primaryGuildId, userData: userData, lastUpdated: now };
   Object.keys(primaryItem).forEach(k => { if (primaryItem[k] === undefined) delete primaryItem[k]; });
-  if (primaryItem.userData && typeof primaryItem.userData === 'object') {
-    Object.keys(primaryItem.userData).forEach(k => { if (primaryItem.userData[k] === undefined) delete primaryItem.userData[k]; });
-  } else {
-    primaryItem.userData = {};
-  }
   const itemsToPut = [primaryItem];
   for (const attrName of LEADERBOARD_ATTRIBUTES) {
     let countValue;
     if (attrName === 'level') countValue = userData.experience?.level;
     else if (attrName === 'totalXp') countValue = userData.experience?.totalXp;
     else countValue = userData[attrName];
+    console.log(`[DynamoDB Save] processing attribute ${attrName} with value ${countValue}`);
     const attributeItem = createAttributeItem(primaryGuildId, primaryUserId, attrName, countValue);
     if (attributeItem) itemsToPut.push(attributeItem);
   }
@@ -150,136 +143,124 @@ async function saveUserData(guildId, userId, userData) {
         .then(() => ({ success: true, id: item.DiscordId }))
         .catch(error => ({ success: false, id: item.DiscordId, error: error }));
   });
-  try {
-    const results = await Promise.all(putPromises);
-    const failedPuts = results.filter(r => !r.success);
-    const primaryFailed = failedPuts.some(f => f.id === String(userId));
-    if (primaryFailed) throw failedPuts.find(f => f.id === String(userId)).error || new Error(`Failed primary save for ${userId}.`);
-  } catch (error) {
-    throw error;
+  const results = await Promise.all(putPromises);
+  const failedPuts = results.filter(r => !r.success);
+  if (failedPuts.some(f => f.id === String(userId))) {
+    throw failedPuts.find(f => f.id === String(userId)).error || new Error(`Failed primary save for ${userId}.`);
   }
 }
 
 async function updateUserData(guildId, userId, updates) {
   if (!userId || !guildId) throw new Error("updateUserData missing required arguments.");
   const updateKeys = Object.keys(updates);
-  if (updateKeys.length === 0) return;
+  if (!updateKeys.length) return;
   const primaryUserId = String(userId);
   const primaryGuildId = String(guildId);
   const now = new Date().toISOString();
-  let primaryUpdateExpression = "SET ";
-  const primaryExpressionAttributeNames = { '#ud': 'userData', '#lu': 'lastUpdated' };
-  const primaryExpressionAttributeValues = { ':lu': now };
-  const primaryUpdateParts = [];
+  let updateExpr = "SET ";
+  const exprNames = { '#ud': 'userData', '#lu': 'lastUpdated' };
+  const exprValues = { ':lu': now };
+  const parts = [];
   for (const key of updateKeys) {
     const keyParts = key.split('.');
-    let pathExpression = '#ud';
-    let currentPathForValuePlaceholder = '';
+    let path = '#ud';
+    let placeholder = '';
     const value = updates[key];
     if (value === undefined) continue;
     for (let i = 0; i < keyParts.length; i++) {
       const part = keyParts[i];
-      const namePlaceholder = `#attr_${i}_${part.replace(/[^a-zA-Z0-9_]/g, '')}`;
-      primaryExpressionAttributeNames[namePlaceholder] = part;
-      pathExpression += `.${namePlaceholder}`;
-      currentPathForValuePlaceholder += (i > 0 ? '_' : '') + part.replace(/[^a-zA-Z0-9_]/g, '');
+      const namePh = `#attr_${i}_${part.replace(/[^a-zA-Z0-9_]/g, '')}`;
+      exprNames[namePh] = part;
+      path += `.${namePh}`;
+      placeholder += (i ? '_' : '') + part.replace(/[^a-zA-Z0-9_]/g, '');
     }
-    const valuePlaceholder = `:${currentPathForValuePlaceholder}`;
-    primaryExpressionAttributeValues[valuePlaceholder] = value;
-    primaryUpdateParts.push(`${pathExpression} = ${valuePlaceholder}`);
+    const valuePh = `:${placeholder}`;
+    exprValues[valuePh] = value;
+    parts.push(`${path} = ${valuePh}`);
   }
-  primaryUpdateParts.push(`#lu = :lu`);
-  primaryUpdateExpression += primaryUpdateParts.join(", ");
-  const primaryUpdateParams = {
+  parts.push(`#lu = :lu`);
+  updateExpr += parts.join(", ");
+  const params = {
     TableName: TABLE_NAME,
     Key: { DiscordId: primaryUserId },
-    UpdateExpression: primaryUpdateExpression,
-    ExpressionAttributeNames: primaryExpressionAttributeNames,
-    ExpressionAttributeValues: primaryExpressionAttributeValues,
+    UpdateExpression: updateExpr,
+    ExpressionAttributeNames: exprNames,
+    ExpressionAttributeValues: exprValues,
     ReturnValues: "NONE"
   };
-  const attributePutPromises = [];
+  const attributePromises = [];
   for (const key of updateKeys) {
-    let attrName = key;
-    if (key.startsWith('experience.')) attrName = key.split('.')[1];
+    let attrName = key.startsWith('experience.') ? key.split('.')[1] : key;
     if (LEADERBOARD_ATTRIBUTES.includes(attrName)) {
       const countValue = updates[key];
-      const attributeItem = createAttributeItem(primaryGuildId, primaryUserId, attrName, countValue);
-      if (attributeItem) {
-        const params = { TableName: TABLE_NAME, Item: attributeItem };
-        attributePutPromises.push(ddbDocClient.send(new PutCommand(params))
-            .then(() => ({ success: true, id: attributeItem.DiscordId }))
-            .catch(error => ({ success: false, id: attributeItem.DiscordId, error: error })));
-      }
+      const item = createAttributeItem(primaryGuildId, primaryUserId, attrName, countValue);
+      if (item) attributePromises.push(ddbDocClient.send(new PutCommand({ TableName: TABLE_NAME, Item: item }))
+          .then(() => ({ success: true, id: item.DiscordId }))
+          .catch(error => ({ success: false, id: item.DiscordId, error: error })));
     }
   }
-  let primaryUpdateError = null;
+  let primaryError = null;
   try {
-    await ddbDocClient.send(new UpdateCommand(primaryUpdateParams));
-  } catch (error) {
-    primaryUpdateError = error;
+    await ddbDocClient.send(new UpdateCommand(params));
+  } catch (e) {
+    primaryError = e;
   }
-  let attributePutResults = [];
-  if (attributePutPromises.length) {
-    attributePutResults = await Promise.all(attributePutPromises);
-  }
-  const failedAttributePuts = attributePutResults.filter(r => !r.success);
-  if (primaryUpdateError) throw primaryUpdateError;
-  if (updates.hasOwnProperty('messages') && failedAttributePuts.some(f => f.id === `${primaryUserId}-messages`)) {
-    throw failedAttributePuts.find(f => f.id === `${primaryUserId}-messages`).error || new Error(`Messages attribute update failed for user ${primaryUserId}`);
+  const results = attributePromises.length ? await Promise.all(attributePromises) : [];
+  if (primaryError) throw primaryError;
+  if (updates.hasOwnProperty('messages') && results.some(r => !r.success && r.id === `${primaryUserId}-messages`)) {
+    throw results.find(r => r.id === `${primaryUserId}-messages`).error || new Error(`Messages attribute update failed for user ${primaryUserId}`);
   }
 }
 
 async function listUserData(guildId) {
   if (!guildId) throw new Error("listUserData missing guildId.");
-  const primaryGuildId = String(guildId);
+  const gid = String(guildId);
   const params = {
     TableName: TABLE_NAME,
     FilterExpression: "#gid = :gid AND attribute_not_exists(attributeName)",
     ExpressionAttributeNames: { "#gid": "guildId" },
-    ExpressionAttributeValues: { ":gid": primaryGuildId },
+    ExpressionAttributeValues: { ":gid": gid },
     ProjectionExpression: "DiscordId, userData"
   };
-  let allItems = [];
-  let lastEvaluatedKey = null;
+  let items = [];
+  let lastKey = null;
   do {
-    if (lastEvaluatedKey) params.ExclusiveStartKey = lastEvaluatedKey;
+    if (lastKey) params.ExclusiveStartKey = lastKey;
     const data = await ddbDocClient.send(new ScanCommand(params));
-    if (data.Items) allItems = allItems.concat(data.Items);
-    lastEvaluatedKey = data.LastEvaluatedKey;
-  } while (lastEvaluatedKey);
-  return allItems
-      .filter(item => item.DiscordId && item.userData && typeof item.userData === 'object')
-      .map(item => ({ userId: item.DiscordId, userData: item.userData }));
+    if (data.Items) items = items.concat(data.Items);
+    lastKey = data.LastEvaluatedKey;
+  } while (lastKey);
+  return items.filter(i => i.DiscordId && i.userData && typeof i.userData === 'object')
+      .map(i => ({ userId: i.DiscordId, userData: i.userData }));
 }
 
 async function incrementMessageLeaderWins(guildId, userId) {
-  const currentData = await getUserData(guildId, userId);
-  if (!currentData) {
+  const data = await getUserData(guildId, userId);
+  if (!data) {
     await updateUserData(guildId, userId, { messageLeaderWins: 1 });
   } else {
-    const currentWins = safeParseNumber(currentData.messageLeaderWins, 0);
-    await updateUserData(guildId, userId, { messageLeaderWins: currentWins + 1 });
+    const wins = safeParseNumber(data.messageLeaderWins, 0);
+    await updateUserData(guildId, userId, { messageLeaderWins: wins + 1 });
   }
 }
 
 async function queryLeaderboard(attributeName, guildId, limit = 10) {
   if (!attributeName || !guildId || !LEADERBOARD_ATTRIBUTES.includes(attributeName)) return [];
-  const primaryGuildId = String(guildId);
-  const queryLimit = Math.max(1, Math.min(limit, 50));
+  const gid = String(guildId);
+  const qLimit = Math.max(1, Math.min(limit, 50));
   const params = {
     TableName: TABLE_NAME,
     IndexName: ATTRIBUTE_INDEX_NAME,
-    KeyConditionExpression: '#attrName = :attrNameVal',
+    KeyConditionExpression: '#attr = :attrVal',
     FilterExpression: '#gid = :gidVal',
-    ExpressionAttributeNames: { '#attrName': 'attributeName', '#gid': 'guildId' },
-    ExpressionAttributeValues: { ':attrNameVal': attributeName, ':gidVal': primaryGuildId },
+    ExpressionAttributeNames: { '#attr': 'attributeName', '#gid': 'guildId' },
+    ExpressionAttributeValues: { ':attrVal': attributeName, ':gidVal': gid },
     ScanIndexForward: false,
-    Limit: queryLimit
+    Limit: qLimit
   };
   try {
-    const result = await ddbDocClient.send(new QueryCommand(params));
-    return result.Items || [];
+    const res = await ddbDocClient.send(new QueryCommand(params));
+    return res.Items || [];
   } catch {
     return [];
   }
@@ -287,33 +268,31 @@ async function queryLeaderboard(attributeName, guildId, limit = 10) {
 
 async function batchResetMessageAttributes(guildId, userIds) {
   if (!guildId || !Array.isArray(userIds) || !userIds.length) return { success: false, processedCount: 0, successCount: 0, failCount: userIds?.length || 0 };
-  const primaryGuildId = String(guildId);
-  const attributeName = 'messages';
-  const resetValue = 0;
+  const gid = String(guildId);
+  const attr = 'messages';
   const BATCH_SIZE = 25;
-  let writeRequests = [];
-  for (const userId of userIds) {
-    if (!userId) continue;
-    const primaryUserId = String(userId);
-    const item = createAttributeItem(primaryGuildId, primaryUserId, attributeName, resetValue);
-    if (item) writeRequests.push({ PutRequest: { Item: item } });
+  let requests = [];
+  for (const u of userIds) {
+    if (!u) continue;
+    const primaryUser = String(u);
+    const item = createAttributeItem(gid, primaryUser, attr, 0);
+    if (item) requests.push({ PutRequest: { Item: item } });
   }
-  let totalSucceeded = 0;
-  let totalFailed = 0;
-  for (let i = 0; i < writeRequests.length; i += BATCH_SIZE) {
-    let batch = writeRequests.slice(i, i + BATCH_SIZE);
+  let succeeded = 0;
+  let failed = 0;
+  for (let i = 0; i < requests.length; i += BATCH_SIZE) {
+    let batch = requests.slice(i, i + BATCH_SIZE);
     let attempt = 0;
     while (batch.length && attempt < 5) {
       attempt++;
-      const params = { RequestItems: { [TABLE_NAME]: batch } };
-      const result = await ddbDocClient.send(new BatchWriteCommand(params));
+      const result = await ddbDocClient.send(new BatchWriteCommand({ RequestItems: { [TABLE_NAME]: batch } }));
       const unprocessed = result.UnprocessedItems?.[TABLE_NAME] || [];
-      totalSucceeded += batch.length - unprocessed.length;
+      succeeded += batch.length - unprocessed.length;
       batch = unprocessed;
     }
-    totalFailed += batch.length;
+    failed += batch.length;
   }
-  return { success: totalFailed === 0, processedCount: writeRequests.length, successCount: totalSucceeded, failCount: totalFailed };
+  return { success: failed === 0, processedCount: requests.length, successCount: succeeded, failCount: failed };
 }
 
 async function updatePrimaryUserMessages(guildId, userId, messageCount) {

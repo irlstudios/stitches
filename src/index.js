@@ -11,7 +11,7 @@ const path = require('path');
 const fs = require('fs');
 const {
   getUserData,
-  getRawUserData,
+  getuserData,
   saveUserData,
   listUserData,
   updateUserData,
@@ -832,11 +832,11 @@ async function handleUserMessage(guildId, userId, channel, message) {
       return;
     }
 
-    const rawUserData = await getRawUserData(userId);
+    const userData = await getUserData(guildId, userId);
     let userRec = null;
     let needsImmediateSave = false;
 
-    if (!rawUserData) {
+    if (!userData) {
       console.log(`[Handle Msg] New user detected: ${userId} in guild ${guildId}. Initializing data.`);
       userRec = {
         streak: 0, highestStreak: 0, messages: 0,
@@ -850,8 +850,8 @@ async function handleUserMessage(guildId, userId, channel, message) {
         channelsParticipated: [], mentionsRepliesCount: { mentions: 0, replies: 0 }
       };
       needsImmediateSave = true;
-    } else if (rawUserData.userData && typeof rawUserData.userData === 'object') {
-      userRec = rawUserData.userData;
+    } else if (userData.userData && typeof userData.userData === 'object') {
+      userRec = userData.userData;
 
 
       if (!userRec.experience || typeof userRec.experience !== 'object') userRec.experience = { totalXp: 0, level: 0 };
@@ -868,7 +868,7 @@ async function handleUserMessage(guildId, userId, channel, message) {
 
     } else {
       console.log(`[Handle Msg] Old data format detected for user ${userId} in guild ${guildId}. Migrating...`);
-      const oldData = rawUserData;
+      const oldData = userData;
       const baseThreshold = safeParseNumber(config.streakSystem?.streakThreshold, 10);
 
       userRec = {
