@@ -1,3 +1,7 @@
+// Reported issues;
+// - Streak roles not being added on milestone achievement.
+// - Certain stats not being counted. Like active days, mentions, etc.
+
 require('dotenv').config();
 
 console.log("LOADED PERSONAL_KEY_ID:", process.env.PERSONAL_AWS_ACCESS_KEY_ID ? 'Exists' : 'MISSING');
@@ -11,7 +15,6 @@ const path = require('path');
 const fs = require('fs');
 const {
   getUserData,
-  getuserData,
   saveUserData,
   listUserData,
   updateUserData,
@@ -59,6 +62,23 @@ for (const file of commandFiles) {
   }
 }
 
+try {
+  const eventFiles = fs.readdirSync('./events').filter(file => file.endsWith('.js'));
+  for (const file of eventFiles) {
+    const event = require(`./events/${file}`);
+    if (!event.name || !event.execute) {
+      console.error(`Error loading ${file}: Event does not properly export 'name' or 'execute'.`);
+      continue;
+    }
+    if (event.once) {
+      client.once(event.name, (...args) => event.execute(...args, client));
+    } else {
+      client.on(event.name, (...args) => event.execute(...args, client));
+    }
+  }
+} catch (error) {
+  console.error('Error reading event files:', error);
+}
 
 const streakCooldowns = new Map();
 const userMessageData = {};
@@ -696,7 +716,7 @@ async function generateWeeklyReport(guildId) {
     const embed = new EmbedBuilder().setColor('#3498DB').setTitle(`Weekly Activity Report - ${currentGuild.name}`)
         .setDescription(`Summary for the week ending ${new Date().toLocaleDateString()}`)
         .addFields(
-            { name: 'Messages Sent (Week)', value: `${totalMsg}`, inline: true },
+            {name: 'Messages Sent (Week)', value: `${totalMsg}`, inline: true },
             { name: 'Active Users (Week)', value: `${activeUsers}`, inline: true },
             { name: 'Avg Msgs/Active User', value: `${avgMsg}`, inline: true },
             { name: 'Current Highest Streak', value: `${highestStr}`, inline: true },
@@ -1003,27 +1023,15 @@ async function handleUserMessage(guildId, userId, channel, message) {
         for (const key in config.streakSystem) {
           if (key.startsWith('role') && key.endsWith('day')) {
             const days = parseInt(key.replace('role','').replace('day',''), 10);
-            if (!isNaN(days) && currentStreakValue === days) {
-              milestoneAchieved = days;
-              milestoneRoleId = config.streakSystem[key];
-              if (milestoneRoleId) {
-                const currentMilestones = Array.isArray(userRec.milestones) ? [...userRec.milestones] : [];
-                if (!currentMilestones.some(m => m.milestone === days)) {
-                  currentMilestones.push({ milestone: days, date: new Date().toISOString() });
-                  userRec.milestones = currentMilestones;
-                  updates.milestones = currentMilestones;
-                }
-                const currentRolesAchieved = Array.isArray(userRec.rolesAchieved) ? [...userRec.rolesAchieved] : [];
-                if (!currentRolesAchieved.includes(milestoneRoleId)) {
-                  currentRolesAchieved.push(milestoneRoleId);
-                  userRec.rolesAchieved = currentRolesAchieved;
-                  updates.rolesAchieved = currentRolesAchieved;
-                }
-                await assignRole(guildId, userId, milestoneRoleId, `${days}-Day Streak Achieved`);
-              } else {
-                console.warn(`[Handle Msg] Milestone reached for ${days} days but Role ID is missing in config for key ${key} (guild ${guildId})`);
+            if (!isNaN(days) && currentStreakValue >= days) {
+              const roleId = config.streakSystem[key];
+              if (roleId && !userRec.rolesAchieved.includes(roleId)) {
+                userRec.rolesAchieved.push(roleId);
+                updates.rolesAchieved = userRec.rolesAchieved;
+                userRec.milestones.push({ milestone: days, date: new Date().toISOString() });
+                updates.milestones = userRec.milestones;
+                await assignRole(guildId, userId, roleId, `${days}-Day Streak Achieved`);
               }
-              break;
             }
           }
         }

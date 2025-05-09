@@ -884,7 +884,7 @@ async function removeMilestone(interaction, config, guildId, systemType) {
   const row = new ActionRowBuilder().addComponents(selectMenu);
 
   const removalPrompt = await interaction.followUp({
-    content: `Select the **${systemType} milestone** you wish to remove from the configuration (this does **not** delete the role itself):`,
+    content: `(Select the **${systemType} milestone** you wish to remove from the configuration (this does **not** delete the role itself):`,
     components: [row],
     ephemeral: true,
     fetchReply: true
